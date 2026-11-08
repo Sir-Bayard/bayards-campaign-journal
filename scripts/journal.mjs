@@ -59,6 +59,94 @@ function matches(query, title, text) {
   return words.every((w) => hay.includes(w));
 }
 
+/** Read a recap laid out the session-recap way: "# Session N: Title", an italic line, a "## Short" section, then
+ * the rest. Returns { session, title, subtitle, short, body }, with short and body still Markdown. */
+function parseRecap(md) {
+  const lines = String(md ?? "").replace(/\r\n?/g, "\n").split("\n");
+  let i = 0;
+  const skipBlank = () => {
+    while (i < lines.length && !lines[i].trim()) i++;
+  };
+  skipBlank();
+  let session = null, title = "", subtitle = "";
+  const h1 = lines[i]?.match(/^#\s+(.+?)\s*#*\s*$/);
+  if (h1) {
+    i++;
+    const name = h1[1].trim();
+    const m = name.match(/^Session\s+(\d+)\s*(?:[:.]|-)\s*(.*)$/i) ?? name.match(/^Session\s+(\d+)$/i);
+    if (m) {
+      session = Number(m[1]);
+      title = (m[2] ?? "").trim();
+    } else title = name;
+    skipBlank();
+  }
+  const it = lines[i]?.trim().match(/^([*_])(?!\1)(.+)\1$/);
+  if (it) {
+    subtitle = it[2].trim();
+    i++;
+  }
+  const rest = lines.slice(i);
+  let short = "", body = rest;
+  const at = rest.findIndex((l) => /^##\s+short\s*#*\s*$/i.test(l.trim()));
+  if (at >= 0) {
+    let end = at + 1;
+    while (end < rest.length && !/^#{1,2}\s/.test(rest[end])) end++;
+    short = rest.slice(at + 1, end).join("\n").trim();
+    body = [...rest.slice(0, at), ...rest.slice(end)];
+  }
+  return { session, title, subtitle, short, body: body.join("\n").trim() };
+}
+
+/** The parts of a recap's italic line: who was away ("Edric absent", "Mira and Edric away"), the real date
+ * ("Sat 15 Nov"), and the other parts (the place, the in-game date), split on middle dots or bars. */
+function splitDetails(line) {
+  const out = { absent: [], played: "", rest: [] };
+  for (const raw of String(line ?? "").split(/\s*[·•|]\s*/)) {
+    const part = raw.trim();
+    if (!part) continue;
+    const away = part.match(/^(.*?)\s+(?:absent|away|missing|not there)$/i) ?? part.match(/^(?:absent|away|missing)\s*:?\s+(.*)$/i);
+    if (away) out.absent.push(...away[1].split(/\s*(?:,|&|\band\b)\s*/i).map((n) => n.trim()).filter(Boolean));
+    else if (!out.played && /^(?:mon|tue|wed|thu|fri|sat|sun)[a-z]*\.?,?\s+(?:\d{1,2}\s+[a-z]{3,}|[a-z]{3,}\.?\s+\d{1,2})/i.test(part)) out.played = part;
+    else out.rest.push(part);
+  }
+  return out;
+}
+
+/** An entry name for a recap: "Session 3: The Lantern", or whichever part there is. */
+function recapName(session, title) {
+  const t = String(title ?? "").trim();
+  if (session && t) return `Session ${session}: ${t}`;
+  return t || (session ? `Session ${session}` : "Session recap");
+}
+
+/** The ownership for giving a document to everyone, or to some players. Owners keep their level, and players who
+ * shouldn't have it are set to None, since a level of their own outranks the default. */
+function ownershipFor(current, everyone, readerIds, playerIds) {
+  const own = { ...(current ?? {}) };
+  own.default = everyone ? Math.max(LEVEL.OBSERVER, own.default ?? LEVEL.NONE) : LEVEL.NONE;
+  for (const id of playerIds) {
+    if (own[id] === LEVEL.OWNER) continue;
+    if (everyone) {
+      if (own[id] !== undefined && own[id] < LEVEL.OBSERVER) own[id] = LEVEL.OBSERVER;
+    } else own[id] = readerIds.includes(id) ? LEVEL.OBSERVER : LEVEL.NONE;
+  }
+  return own;
+}
+
+/** Markdown with every heading moved down by some levels (at most to level 6), leaving code blocks alone. */
+function shiftHeadings(md, by) {
+  if (!by) return md;
+  let fence = false;
+  return String(md).split("\n").map((line) => {
+    if (/^\s*(```|~~~)/.test(line)) fence = !fence;
+    if (fence) return line;
+    return line.replace(/^(#{1,6})(\s)/, (m, h, sp) => `${"#".repeat(Math.min(6, h.length + by))}${sp}`);
+  }).join("\n");
+}
+
+/** A file name from an entry name. */
+const slug = (name) => String(name ?? "entry").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "entry";
+
 /* ------------------------------------------------------------------ */
 /* Folders                                                              */
 /* ------------------------------------------------------------------ */
@@ -116,7 +204,7 @@ function describe(entry) {
   const f = flagsOf(entry);
   const kind = kindFor(where.area, f.kind);
   const { readers, all } = readersOf(entry.ownership, game.users.contents);
-  return { entry, id: entry.id, name: entry.name, kind, area: where.area, user: where.user, pinned: !!f.pinned, session: f.session ?? null, date: f.date ?? null, played: f.played ?? null, attended: Array.isArray(f.attended) ? f.attended : [], readers, all, sort: entry.sort ?? 0 };
+  return { entry, id: entry.id, name: entry.name, kind, area: where.area, user: where.user, pinned: !!f.pinned, subtitle: f.subtitle ?? "", session: f.session ?? null, date: f.date ?? null, played: f.played ?? null, attended: Array.isArray(f.attended) ? f.attended : [], readers, all, sort: entry.sort ?? 0 };
 }
 
 /** Every journal entry this user can read. */
@@ -147,13 +235,76 @@ function dots(d) {
   }).join("");
 }
 
+const num = (v, d = 0) => (Number.isFinite(Number(v)) ? Number(v) : d);
+function months() {
+  const vals = game.time?.calendar?.months?.values ?? [];
+  return vals.map((m) => ({ name: m.name, short: String(m.abbreviation || m.name).split(",")[0].trim(), days: m.days }));
+}
+/** Today's in-game date as { y, m, d }, the year as the calendar shows it, months and days from 1. */
+function today() {
+  const c = game.time.components ?? {};
+  const y0 = num(game.time.calendar?.years?.yearZero, 0);
+  return { y: num(c.year) + y0, m: num(c.month) + 1, d: num(c.dayOfMonth) + 1 };
+}
 function fmtDate(x) {
   if (!x || !Number.isFinite(x.y)) return "";
-  const months = game.time?.calendar?.months?.values ?? [];
-  const m = months[x.m - 1];
-  const name = m ? String(m.abbreviation || m.name).split(",")[0].trim() : `Month ${x.m}`;
-  return `${x.d} ${name} ${x.y}`;
+  const mo = months()[x.m - 1];
+  return `${x.d} ${mo?.short ?? `Month ${x.m}`} ${x.y}`;
 }
+function monthIndex(name) {
+  const n = String(name).trim().toLowerCase();
+  if (!n) return -1;
+  const list = months();
+  let i = list.findIndex((m) => m.short.toLowerCase() === n || m.name.toLowerCase() === n);
+  if (i < 0 && n.length >= 3) i = list.findIndex((m) => m.short.toLowerCase().startsWith(n) || m.name.toLowerCase().startsWith(n));
+  if (i < 0 && /^\d+$/.test(n)) i = Number(n) - 1;
+  return i;
+}
+/** "15 Vind", "15 Vind 1534", "Vind 15" or "1534-12-15". Null for blank, undefined if unreadable. */
+function parseDate(str, defYear = today().y) {
+  const s = String(str ?? "").trim().replace(/\s+/g, " ");
+  if (!s) return null;
+  let y, mi, d;
+  let m = s.match(/^(-?\d{1,5})-(\d{1,2})-(\d{1,2})$/);
+  if (m) [y, mi, d] = [Number(m[1]), Number(m[2]) - 1, Number(m[3])];
+  else if ((m = s.match(/^(\d{1,2})(?:st|nd|rd|th)?\s+([^\d,]+?)(?:,?\s+(-?\d{1,5}))?$/i))) [d, mi, y] = [Number(m[1]), monthIndex(m[2]), m[3] ? Number(m[3]) : defYear];
+  else if ((m = s.match(/^([^\d,]+?)\s+(\d{1,2})(?:,?\s+(-?\d{1,5}))?$/i))) [mi, d, y] = [monthIndex(m[1]), Number(m[2]), m[3] ? Number(m[3]) : defYear];
+  else return undefined;
+  const list = months();
+  if (mi < 0 || (list.length && mi >= list.length)) return undefined;
+  const days = list[mi]?.days;
+  if (d < 1 || (days && d > days)) return undefined;
+  return { y, m: mi + 1, d };
+}
+/** Today's real date the way recaps write it: "Sat 8 Nov". */
+function realDate(dt = new Date()) {
+  const wd = dt.toLocaleDateString("en-US", { weekday: "short" });
+  const mo = dt.toLocaleDateString("en-US", { month: "short" });
+  return `${wd} ${dt.getDate()} ${mo}`;
+}
+
+const converter = () => new showdown.Converter({ tables: true, strikethrough: true, simplifiedAutoLink: true, noHeaderId: true, openLinksInNewWindow: true });
+const md2html = (md) => (md ? converter().makeHtml(md) : "");
+const html2md = (html) => (html ? converter().makeMarkdown(html).replace(/<!-- -->\n?/g, "").trim() : "");
+
+/** A recap's page from the parsed file: the short version in its box, then the rest. */
+function recapHTML(r) {
+  return `${r.short ? `<blockquote class="bcj-short">${md2html(r.short)}</blockquote>` : ""}${md2html(r.body)}`;
+}
+
+/** The short version of a recap as HTML: its short box, else its first quote, else its first paragraph. */
+function shortOf(entry) {
+  const page = entry.pages.contents.find((p) => p.type === "text");
+  if (!page) return "";
+  const doc = new DOMParser().parseFromString(page.text?.content ?? "", "text/html");
+  const el = doc.querySelector("blockquote.bcj-short") ?? doc.querySelector("blockquote") ?? doc.querySelector("p");
+  return el ? (el.tagName === "BLOCKQUOTE" ? el.innerHTML : el.outerHTML) : "";
+}
+
+const TEMPLATES = {
+  recap: `<blockquote class="bcj-short"><p>The whole session in a paragraph.</p></blockquote><h2>Full</h2><p></p><h2>NPCs Met</h2><p></p><h2>Places Visited</h2><p></p><h2>Loot and Treasure</h2><p></p>`,
+  letter: `<p><em>To whoever reads this,</em></p><p>The letter's text.</p><p style="text-align: right"><em>The writer</em></p>`,
+};
 
 /** The line under an entry's name in the list. */
 function subline(d) {
@@ -169,6 +320,7 @@ function subline(d) {
 /** The line under an entry's title in the reading pane. */
 function metaline(d) {
   if (d.kind === "recap") {
+    if (d.subtitle) return d.subtitle;
     const played = d.played ? `played ${d.played}` : "";
     return [d.session ? `Session ${d.session}` : "Session recap", fmtDate(d.date), played].filter(Boolean).join(" · ");
   }
@@ -251,6 +403,15 @@ class JournalApp extends foundry.applications.api.ApplicationV2 {
       bcjOpenPage: JournalApp.#onOpenPage,
       bcjToc: JournalApp.#onToc,
       bcjFolders: JournalApp.#onFolders,
+      bcjNewRecap: JournalApp.#onNewRecap,
+      bcjNewHandout: JournalApp.#onNewHandout,
+      bcjDetails: JournalApp.#onDetails,
+      bcjPin: JournalApp.#onPin,
+      bcjGive: JournalApp.#onGive,
+      bcjShow: JournalApp.#onShow,
+      bcjPrevious: JournalApp.#onPrevious,
+      bcjMarkdown: JournalApp.#onMarkdown,
+      bcjExport: JournalApp.#onExport,
     },
   };
 
@@ -324,9 +485,10 @@ class JournalApp extends foundry.applications.api.ApplicationV2 {
     const listBody = shown.length || groups.length ? list : "";
 
     return `<div class="bcj-shell">
-      <nav class="bcj-rail">${rail}${this.isGM ? `<div class="bcj-railfoot"><a data-action="bcjFolders" data-tooltip="Show the journal's folders in the Journal tab"><i class="fa-solid fa-folder-tree"></i><span>Folders</span></a></div>` : ""}</nav>
+      <nav class="bcj-rail">${rail}<div class="bcj-railfoot"><a data-action="bcjExport" data-tooltip="Download this tab's entries as one Markdown file"><i class="fa-solid fa-file-export"></i><span>Export</span></a>${this.isGM ? `<a data-action="bcjFolders" data-tooltip="Show the journal's folders in the Journal tab"><i class="fa-solid fa-folder-tree"></i><span>Folders</span></a>` : ""}</div></nav>
       <section class="bcj-list">
         <div class="bcj-search"><i class="fa-solid fa-magnifying-glass"></i><input type="search" name="bcj-q" placeholder="Search the journal" value="${esc(this.view.query)}"></div>
+        ${this.isGM ? `<div class="bcj-actions"><button type="button" data-action="bcjNewRecap"><i class="fa-solid fa-plus"></i> New recap</button><button type="button" data-action="bcjNewHandout"><i class="fa-solid fa-envelope-open-text"></i> New handout</button></div>` : ""}
         <div class="bcj-scroll">${noFolders ? `<p class="bcj-none">The journal's folders are being made.</p>` : listBody}<p class="bcj-none bcj-nomatch" hidden>Nothing matches.</p></div>
       </section>
       <section class="bcj-read">${current ? await this.#page(current) : this.#empty()}</section>
@@ -349,8 +511,17 @@ class JournalApp extends foundry.applications.api.ApplicationV2 {
         return `<span class="bcj-dot" style="--c:${esc(w.color)}" data-tooltip="${esc(w.name)}">${esc(w.initial)}</span>`;
       }).join("")}</div>`
       : "";
-    const canEdit = entry.isOwner;
-    const tools = canEdit ? `<button type="button" class="bcj-edit" data-action="bcjEdit"><i class="fa-solid fa-pen"></i> Edit</button>` : "";
+    const B = (action, icon, label, tip = "") => `<button type="button" data-action="${action}"${tip ? ` data-tooltip="${esc(tip)}"` : ""}><i class="${icon}"></i> ${label}</button>`;
+    const gm = this.isGM;
+    const tools = [
+      gm && d.kind === "recap" ? B("bcjPrevious", "fa-solid fa-clock-rotate-left", "Previously on…", "Show the short version on every player's screen") : "",
+      gm && d.kind === "recap" ? B("bcjDetails", "fa-solid fa-sliders", "Details", "Session, dates and who was at the table") : "",
+      gm && d.kind === "handout" ? B("bcjGive", "fa-solid fa-user-plus", "Give to…") : "",
+      gm && d.kind === "page" ? B("bcjPin", d.pinned ? "fa-solid fa-thumbtack-slash" : "fa-solid fa-thumbtack", d.pinned ? "Unpin" : "Pin", d.pinned ? "Move it back among the pages" : "Keep it at the top of the party journal") : "",
+      gm ? B("bcjShow", "fa-solid fa-eye", "Show to players", "Open it on the screens of the players who can read it") : "",
+      B("bcjMarkdown", "fa-solid fa-file-arrow-down", "Markdown", "Download this entry as a Markdown file"),
+      entry.isOwner ? `<button type="button" class="bcj-edit" data-action="bcjEdit"><i class="fa-solid fa-pen"></i> Edit</button>` : "",
+    ].join("");
     const text = d.kind === "handout" ? `<div class="bcj-letter">${body}</div>` : body;
     return `<article class="bcj-page bcj-kind-${d.kind}" data-entry="${esc(d.id)}">
       <header class="bcj-ph"><div><h1>${esc(d.name)}</h1><div class="bcj-meta">${esc(metaline(d))}</div>${att}</div>
@@ -452,6 +623,110 @@ class JournalApp extends foundry.applications.api.ApplicationV2 {
     if (root) game.folders.get(root.id)?.expand?.();
   }
 
+  static async #onNewRecap() {
+    if (!this.isGM) return;
+    const party = findFolder("party");
+    if (!party) return ui.notifications.warn("Campaign Journal: the Party folder isn't there yet.");
+    const sessions = readable().filter((d) => d.kind === "recap").map((d) => Number(d.session) || 0);
+    const data = await recapDialog({ session: (sessions.length ? Math.max(...sessions) : 0) + 1, date: today(), played: realDate(), attended: players().map((u) => u.id), share: true }, { create: true });
+    if (!data) return;
+    const r = parseRecap(data.md);
+    const session = data.session ?? r.session;
+    const name = recapName(session, data.title || r.title);
+    const html = data.md.trim() ? recapHTML(r) : TEMPLATES.recap;
+    const entry = await JournalEntry.create({
+      name, folder: party.id, ownership: { default: data.share ? LEVEL.OBSERVER : LEVEL.NONE },
+      flags: { [MOD]: { kind: "recap", session, date: data.date, played: data.played, attended: data.attended, subtitle: data.subtitle || r.subtitle } },
+      pages: [{ name, type: "text", text: { content: html, format: 1 } }],
+    });
+    if (!entry) return;
+    this.view.tab = "party";
+    this.view.entry = entry.id;
+    this.render();
+    if (!data.md.trim()) entry.pages.contents[0]?.sheet.render(true);
+  }
+
+  static async #onDetails() {
+    const entry = game.journal.get(this.view.entry);
+    if (!this.isGM || !entry) return;
+    const f = flagsOf(entry);
+    const data = await recapDialog({ session: f.session, title: entry.name.replace(/^Session\s+\d+\s*:\s*/i, ""), date: f.date, played: f.played, attended: f.attended ?? [], subtitle: f.subtitle ?? "" }, { create: false });
+    if (!data) return;
+    const name = recapName(data.session, data.title);
+    const update = { flags: { [MOD]: { session: data.session, date: data.date, played: data.played, attended: data.attended, subtitle: data.subtitle } } };
+    if (name !== entry.name) update.name = name;
+    await entry.update(update);
+    const page = entry.pages.contents.length === 1 ? entry.pages.contents[0] : null;
+    if (page && update.name && page.name !== name) await page.update({ name });
+  }
+
+  static async #onNewHandout() {
+    if (!this.isGM) return;
+    const folder = findFolder("handouts");
+    if (!folder) return ui.notifications.warn("Campaign Journal: the Handouts folder isn't there yet.");
+    const data = await giveDialog({ title: "New handout", name: "", everyone: false, readers: [], letter: true });
+    if (!data?.name) return;
+    const entry = await JournalEntry.create({
+      name: data.name, folder: folder.id, ownership: ownershipFor({ default: LEVEL.NONE }, data.everyone, data.readers, players().map((u) => u.id)),
+      pages: [{ name: data.name, type: "text", text: { content: data.letter ? TEMPLATES.letter : "", format: 1 } }],
+    });
+    if (!entry) return;
+    this.view.tab = "handouts";
+    this.view.entry = entry.id;
+    this.render();
+    entry.pages.contents[0]?.sheet.render(true);
+  }
+
+  static async #onGive() {
+    const entry = game.journal.get(this.view.entry);
+    if (!this.isGM || !entry) return;
+    const { readers, all } = readersOf(entry.ownership, game.users.contents);
+    const data = await giveDialog({ title: `Give "${entry.name}"`, everyone: all, readers: readers.map((u) => u.id) });
+    if (!data) return;
+    await entry.update({ ownership: ownershipFor(entry.ownership, data.everyone, data.readers, players().map((u) => u.id)) });
+  }
+
+  static async #onPin() {
+    const entry = game.journal.get(this.view.entry);
+    if (!this.isGM || !entry) return;
+    await entry.setFlag(MOD, "pinned", !flagsOf(entry).pinned);
+  }
+
+  static #onShow() {
+    const entry = game.journal.get(this.view.entry);
+    if (!this.isGM || !entry) return;
+    const to = readersOf(entry.ownership, game.users.contents).readers.filter((u) => u.active);
+    if (!to.length) return ui.notifications.warn(`No player who can read "${entry.name}" is logged in.`);
+    game.socket.emit(SOCKET, { type: "show", entry: entry.id, users: to.map((u) => u.id) });
+    ui.notifications.info(`Shown to ${to.map((u) => who(u).name).join(", ")}.`);
+  }
+
+  static #onPrevious() {
+    const entry = game.journal.get(this.view.entry);
+    if (!this.isGM || !entry) return;
+    if (!shortOf(entry)) return ui.notifications.warn(`"${entry.name}" has no short version to show.`);
+    const to = readersOf(entry.ownership, game.users.contents).readers.filter((u) => u.active);
+    if (!to.length) return ui.notifications.warn(`No player who can read "${entry.name}" is logged in.`);
+    game.socket.emit(SOCKET, { type: "previously", entry: entry.id, users: to.map((u) => u.id) });
+    PreviouslyApp.show(entry);
+  }
+
+  static #onMarkdown() {
+    const entry = game.journal.get(this.view.entry);
+    const d = entry && describe(entry);
+    if (!d) return;
+    foundry.utils.saveDataToFile(entryMarkdown(d), "text/markdown", `${slug(entry.name)}.md`);
+  }
+
+  static #onExport() {
+    const seen = new Set();
+    const list = this.groups(readable()).flatMap(([, items]) => items).filter((d) => !seen.has(d.id) && seen.add(d.id));
+    if (!list.length) return ui.notifications.warn("Nothing on this tab to export.");
+    const label = this.tabs().find(([k]) => k === this.view.tab)?.[1] ?? "Journal";
+    const md = `# Campaign Journal: ${label}\n\n${list.map((d) => entryMarkdown(d, 2)).join("\n\n---\n\n")}\n`;
+    foundry.utils.saveDataToFile(md, "text/markdown", `campaign-journal-${slug(label)}.md`);
+  }
+
   /** Open the window, on an entry if one is given. */
   static open(entryId = null) {
     const app = [...openApps][0] ?? new JournalApp();
@@ -466,6 +741,174 @@ class JournalApp extends foundry.applications.api.ApplicationV2 {
     if (app.minimized) app.maximize();
     return app;
   }
+}
+
+const players = () => game.users.filter((u) => !u.isGM).sort((a, b) => a.name.localeCompare(b.name));
+const DialogV2 = () => foundry.applications.api.DialogV2;
+
+/** One entry as Markdown: its title (at the given heading level), its line, then its readable text pages. */
+function entryMarkdown(d, level = 1) {
+  const entry = d.entry;
+  const hashes = "#".repeat(level);
+  const pages = entry.pages.contents.filter((p) => p.type === "text" && p.testUserPermission(game.user, "OBSERVER")).sort((a, b) => a.sort - b.sort);
+  const parts = [`${hashes} ${entry.name}`, `*${metaline(d)}*`];
+  for (const p of pages) {
+    if (pages.length > 1) parts.push(`${hashes}# ${p.name}`);
+    // The page's own headings go below the entry's title (and its page names, if it has several).
+    const shift = level - 1 + (pages.length > 1 ? 1 : 0);
+    parts.push(shiftHeadings(html2md(p.text?.content ?? ""), shift));
+  }
+  return parts.filter(Boolean).join("\n\n");
+}
+
+const checkboxes = (name, list, checked) => list.map((u) => `<label class="bcj-check"><input type="checkbox" name="${name}" value="${esc(u.id)}" ${checked.includes(u.id) ? "checked" : ""}> ${esc(who(u).name)}${who(u).name !== u.name ? ` <span class="bcj-dim">(${esc(u.name)})</span>` : ""}</label>`).join("");
+
+/** The New recap and recap details form. Resolves to the values, or null if canceled. */
+async function recapDialog(v, { create }) {
+  const form = `<div class="bcj-form">
+    <div class="bcj-row"><label>Session <input type="number" name="session" min="0" value="${esc(v.session ?? "")}"></label><label class="bcj-grow">Title <input type="text" name="title" value="${esc(v.title ?? "")}" placeholder="${create ? "Taken from the file if left blank" : ""}"></label></div>
+    <div class="bcj-row"><label>In-game date <input type="text" name="date" value="${esc(fmtDate(v.date))}" placeholder="14 Aten 1534"></label><label>Played <input type="text" name="played" value="${esc(v.played ?? "")}" placeholder="Sat 8 Nov"></label></div>
+    <label>Line under the title <input type="text" name="subtitle" value="${esc(v.subtitle ?? "")}" placeholder="${create ? "Taken from the file if left blank; otherwise the session, dates and who played" : "Session, dates and who played if left blank"}"></label>
+    <fieldset><legend>At the table</legend>${checkboxes("attended", players(), v.attended ?? []) || `<p class="bcj-dim">No players yet.</p>`}</fieldset>
+    ${create ? `<label>Recap (Markdown) <textarea name="md" rows="9" placeholder="Paste the recap here, or import the file. Leave it empty for a blank recap to write in."></textarea></label>
+    <div class="bcj-row"><label class="bcj-file"><i class="fa-solid fa-file-import"></i> Import a file <input type="file" name="file" accept=".md,.markdown,.txt,text/markdown,text/plain"></label><label class="bcj-check"><input type="checkbox" name="share" ${v.share ? "checked" : ""}> Players can read it now</label></div>` : ""}
+  </div>`;
+  return DialogV2().wait({
+    window: { title: create ? "New recap" : "Recap details", icon: "fa-solid fa-book-open" },
+    classes: ["bcj-dialog"],
+    position: { width: 560 },
+    content: form,
+    render: (event, dialog) => {
+      const el = dialog.element ?? event?.target?.element;
+      if (!el) return;
+      const area = el.querySelector('textarea[name="md"]');
+      /** Fill the form from a recap's heading and italic line: session, title, dates, and who was away. */
+      const fill = (text) => {
+        const r = parseRecap(text);
+        const f = (n) => el.querySelector(`[name="${n}"]`);
+        if (r.session) f("session").value = r.session;
+        if (r.title && !f("title").value) f("title").value = r.title;
+        if (!r.subtitle) return;
+        const d = splitDetails(r.subtitle);
+        const date = d.rest.map((p) => parseDate(p)).find((x) => x);
+        if (date) f("date").value = fmtDate(date);
+        if (d.played) f("played").value = d.played;
+        if (d.absent.length) {
+          const away = d.absent.map((n) => n.toLowerCase());
+          for (const box of el.querySelectorAll('input[name="attended"]')) {
+            const u = game.users.get(box.value);
+            const names = [who(u).name, u?.name].filter(Boolean).map((n) => n.toLowerCase());
+            box.checked = !away.some((a) => names.some((n) => n === a || n.split(/\s+/)[0] === a || a.split(/\s+/)[0] === n.split(/\s+/)[0]));
+          }
+        }
+      };
+      const file = el.querySelector('input[name="file"]');
+      file?.addEventListener("change", async () => {
+        const f = file.files?.[0];
+        if (!f) return;
+        const text = await f.text();
+        area.value = text;
+        fill(text);
+      });
+      area?.addEventListener("paste", () => setTimeout(() => fill(area.value), 0));
+    },
+    buttons: [
+      { action: "ok", label: create ? "Make the recap" : "Save", icon: "fa-solid fa-check", default: true, callback: (event, button) => {
+        const e = button.form.elements;
+        const date = parseDate(e.date.value);
+        if (date === undefined) {
+          ui.notifications.warn(`Campaign Journal: "${e.date.value}" isn't a date the calendar knows; it was left out.`);
+        }
+        return {
+          session: e.session.value === "" ? null : Number(e.session.value),
+          title: e.title.value.trim(),
+          date: date || null,
+          played: e.played.value.trim(),
+          subtitle: e.subtitle.value.trim(),
+          attended: [...button.form.querySelectorAll('input[name="attended"]:checked')].map((x) => x.value),
+          md: e.md?.value ?? "",
+          share: !!e.share?.checked,
+        };
+      } },
+      { action: "cancel", label: "Cancel" },
+    ],
+    rejectClose: false,
+  }).then((r) => (r && typeof r === "object" ? r : null));
+}
+
+/** Who gets a handout (and, for a new one, its name and starting layout). Resolves to the values, or null. */
+async function giveDialog(v) {
+  const isNew = v.name !== undefined;
+  const form = `<div class="bcj-form">
+    ${isNew ? `<label>Name <input type="text" name="name" value="${esc(v.name)}" placeholder="A letter from Maud Holloway" autofocus></label>` : ""}
+    <fieldset><legend>Who gets it</legend><label class="bcj-check"><input type="checkbox" name="everyone" ${v.everyone ? "checked" : ""}> <strong>Everyone</strong> <span class="bcj-dim">(players who join later too)</span></label>${checkboxes("reader", players(), v.readers)}</fieldset>
+    ${isNew ? `<label class="bcj-check"><input type="checkbox" name="letter" ${v.letter ? "checked" : ""}> Start from the letter layout</label>` : ""}
+  </div>`;
+  return DialogV2().wait({
+    window: { title: v.title, icon: "fa-solid fa-envelope-open-text" },
+    classes: ["bcj-dialog"],
+    position: { width: 420 },
+    content: form,
+    buttons: [
+      { action: "ok", label: isNew ? "Make it" : "Save", icon: "fa-solid fa-check", default: true, callback: (event, button) => {
+        const e = button.form.elements;
+        return { name: e.name?.value.trim(), everyone: !!e.everyone.checked, readers: [...button.form.querySelectorAll('input[name="reader"]:checked')].map((x) => x.value), letter: !!e.letter?.checked };
+      } },
+      { action: "cancel", label: "Cancel" },
+    ],
+    rejectClose: false,
+  }).then((r) => (r && typeof r === "object" ? r : null));
+}
+
+/** "Previously on…": a recap's short version, on every player's screen. */
+class PreviouslyApp extends foundry.applications.api.ApplicationV2 {
+  static DEFAULT_OPTIONS = {
+    id: `${MOD}-previously`,
+    classes: ["bcj", "bcj-prev"],
+    window: { title: "Previously on…", icon: "fa-solid fa-clock-rotate-left" },
+    position: { width: 520, height: "auto" },
+    actions: { bcjReadAll: PreviouslyApp.#onReadAll },
+  };
+
+  constructor(entry) {
+    super();
+    this.entryId = entry.id;
+  }
+
+  async _renderHTML() {
+    const entry = game.journal.get(this.entryId);
+    if (!entry) return `<p class="bcj-hint">That recap is gone.</p>`;
+    const TE = foundry.applications?.ux?.TextEditor?.implementation ?? globalThis.TextEditor;
+    const html = await TE.enrichHTML(shortOf(entry), { relativeTo: entry });
+    return `<article class="bcj-page"><h1>${esc(entry.name)}</h1><div class="bcj-text">${html}</div>
+      <div class="bcj-tools"><button type="button" data-action="bcjReadAll"><i class="fa-solid fa-book-open"></i> Read the whole recap</button></div></article>`;
+  }
+
+  _replaceHTML(result, content) {
+    content.innerHTML = result;
+  }
+
+  static #onReadAll() {
+    JournalApp.open(this.entryId);
+    this.close();
+  }
+
+  static show(entry) {
+    foundry.applications.instances.get(`${MOD}-previously`)?.close({ animate: false });
+    new PreviouslyApp(entry).render({ force: true });
+  }
+}
+
+const SOCKET = `module.${MOD}`;
+/** Messages from a GM's client: open an entry, or show a recap's short version, for the players named. */
+function onSocket(msg, senderId) {
+  if (!msg?.type || game.user.isGM) return;
+  if (senderId && !game.users.get(senderId)?.isGM) return;
+  if (Array.isArray(msg.users) && !msg.users.includes(game.user.id)) return;
+  const entry = game.journal.get(msg.entry);
+  if (!entry?.testUserPermission(game.user, "OBSERVER")) return;
+  if (msg.type === "show") JournalApp.open(entry.id);
+  else if (msg.type === "previously") PreviouslyApp.show(entry);
 }
 
 /* ------------------------------------------------------------------ */
@@ -507,6 +950,7 @@ function addDirectoryButton(app, html) {
 
 function start() {
   game.modules.get(MOD).api = { open: (entryId) => JournalApp.open(entryId), refresh };
+  game.socket.on(SOCKET, onSocket);
   ensureFolders();
   const dir = ui.journal ?? ui.sidebar?.tabs?.journal;
   if (dir?.element) addDirectoryButton(dir, dir.element);
@@ -531,4 +975,4 @@ if (globalThis.game?.ready) {
   start();
 }
 
-export { kindFor, levelFor, readersOf, compareRecaps, matches, stripTags, esc, KINDS };
+export { kindFor, levelFor, readersOf, compareRecaps, matches, stripTags, esc, KINDS, parseRecap, recapName, ownershipFor, slug, splitDetails, shiftHeadings };
