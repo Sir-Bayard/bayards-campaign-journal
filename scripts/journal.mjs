@@ -6,7 +6,8 @@
  */
 
 const MOD = "bayards-campaign-journal";
-const VIEW_KEY = `${MOD}.view`;
+/** Browser storage keys, per world and user (one browser can hold several worlds and users). */
+const storeKey = (what) => `${MOD}.${what}.${game.world?.id ?? "world"}.${game.user?.id ?? "user"}`;
 /** Ownership levels (CONST.DOCUMENT_OWNERSHIP_LEVELS), written out so the helpers run without Foundry. */
 const LEVEL = { INHERIT: -1, NONE: 0, LIMITED: 1, OBSERVER: 2, OWNER: 3 };
 const FOLDER_NAMES = { root: "Campaign Journal", party: "Party", handouts: "Handouts", players: "Players" };
@@ -194,12 +195,44 @@ function areaOf(folder) {
 
 const isPrimaryGM = () => game.user.isGM && game.users.activeGM?.id === game.user.id;
 
-/** Make the journal's folders, and one for each player, if they're missing. Only the active GM does this. */
+/* Foundry's active GM is a user, not a browser tab, so the same GM in two tabs would act twice. Each GM tab gets an
+ * id and tells the others about itself; only the tab with the lowest id among the primary GM's live tabs acts. */
+const CLIENT_ID = globalThis.foundry?.utils?.randomID?.(16) ?? Math.random().toString(36).slice(2, 18);
+const gmTabs = new Map();
+function iAmLeader() {
+  if (!isPrimaryGM()) return false;
+  const now = Date.now();
+  for (const [id, seen] of gmTabs) if (now - seen > 45000) gmTabs.delete(id);
+  return [...gmTabs.keys()].every((id) => CLIENT_ID < id);
+}
+/** Which GM tab acts, for checking from the console. */
+const gmTabInfo = () => ({ me: CLIENT_ID, others: [...gmTabs.keys()], leader: iAmLeader() });
+function announceTab(hello = false) {
+  if (game.user.isGM) game.socket.emit(SOCKET, { type: "gmtab", client: CLIENT_ID, hello });
+}
+
+/** Make the journal's folders, and one for each player, if they're missing. Only the active GM's lead tab does
+ * this; a call while it runs asks for one more pass, so nothing in between is missed. */
 let ensuring = null;
+let ensureAgain = false;
 async function ensureFolders() {
-  if (!isPrimaryGM()) return;
-  if (ensuring) return ensuring;
+  if (!iAmLeader()) return;
+  if (ensuring) {
+    ensureAgain = true;
+    return ensuring;
+  }
   ensuring = (async () => {
+    do {
+      ensureAgain = false;
+      await ensurePass();
+    } while (ensureAgain);
+  })().catch((err) => console.error(`${MOD} | couldn't make the journal folders`, err)).finally(() => {
+    ensuring = null;
+  });
+  return ensuring;
+}
+async function ensurePass() {
+  {
     const make = (name, role, parent, extra = {}) => Folder.create({ name, type: "JournalEntry", folder: parent?.id ?? null, sorting: "m", flags: { [MOD]: { role, ...extra } } });
     const root = findFolder("root") ?? await make(FOLDER_NAMES.root, "root", null);
     for (const role of ["party", "handouts", "players"]) if (!findFolder(role)) await make(FOLDER_NAMES[role], role, root);
@@ -210,10 +243,7 @@ async function ensureFolders() {
       if (!f) await make(u.name, "player", players, { user: u.id });
       else if (f.name !== u.name) await f.update({ name: u.name });
     }
-  })().catch((err) => console.error(`${MOD} | couldn't make the journal folders`, err)).finally(() => {
-    ensuring = null;
-  });
-  return ensuring;
+  }
 }
 
 /* ------------------------------------------------------------------ */
@@ -294,7 +324,12 @@ function dots(d) {
 const num = (v, d = 0) => (Number.isFinite(Number(v)) ? Number(v) : d);
 function months() {
   const vals = game.time?.calendar?.months?.values ?? [];
-  return vals.map((m) => ({ name: m.name, short: String(m.abbreviation || m.name).split(",")[0].trim(), days: m.days }));
+  // Foundry's own calendar names its months with translation keys; calendar modules usually give plain names.
+  const L = (key) => (key ? String(game.i18n?.localize?.(String(key)) ?? key) : "");
+  return vals.map((m) => {
+    const name = L(m.name);
+    return { name, short: String(L(m.abbreviation) || name).split(",")[0].trim(), days: m.days };
+  });
 }
 /** Today's in-game date as { y, m, d }, the year as the calendar shows it, months and days from 1. */
 function today() {
@@ -316,7 +351,8 @@ function monthIndex(name) {
   if (i < 0 && /^\d+$/.test(n)) i = Number(n) - 1;
   return i;
 }
-/** "15 Vind", "15 Vind 1534", "Vind 15" or "1534-12-15". Null for blank, undefined if unreadable. */
+/** "15 March", "15 March 1200", "March 15" or "1200-03-15", month names from the world's calendar. Null for blank,
+ * undefined if unreadable. */
 function parseDate(str, defYear = today().y) {
   const s = String(str ?? "").trim().replace(/\s+/g, " ");
   if (!s) return null;
@@ -348,11 +384,22 @@ function recapHTML(r) {
   return `${r.short ? `<blockquote class="bcj-short">${md2html(r.short)}</blockquote>` : ""}${md2html(r.body)}`;
 }
 
-/** The short version of a recap as HTML: its short box, else its first quote, else its first paragraph. */
+/** A text page's HTML without Foundry's GM secret blocks (section.secret), unless they may be kept: the page's
+ * owners see them in the reading pane, but they never go into downloads, search or "Previously on…" for others. */
+function visibleHTML(page, keepSecrets = page.isOwner) {
+  const html = page.text?.content ?? "";
+  if (keepSecrets || !/secret/i.test(html)) return html;
+  const doc = new DOMParser().parseFromString(html, "text/html");
+  for (const el of doc.querySelectorAll("section.secret")) el.remove();
+  return doc.body.innerHTML;
+}
+
+/** The short version of a recap as HTML: its short box, else its first quote, else its first paragraph. Never from
+ * a secret block, so the GM's popup shows what the players see. */
 function shortOf(entry) {
   const page = entry.pages.contents.find((p) => p.type === "text");
   if (!page) return "";
-  const doc = new DOMParser().parseFromString(page.text?.content ?? "", "text/html");
+  const doc = new DOMParser().parseFromString(visibleHTML(page, false), "text/html");
   const el = doc.querySelector("blockquote.bcj-short") ?? doc.querySelector("blockquote") ?? doc.querySelector("p");
   return el ? (el.tagName === "BLOCKQUOTE" ? el.innerHTML : el.outerHTML) : "";
 }
@@ -368,7 +415,8 @@ function subline(d) {
   if (d.kind === "handout") return "Handout";
   if (d.kind === "journal") {
     const u = game.users.get(d.user);
-    return u?.id === game.user.id ? "Private" : `${who(u).name}'s journal`;
+    if (!u) return "A former player's journal";
+    return u.id === game.user.id ? "Private" : `${who(u).name}'s journal`;
   }
   if (d.sharedBy) return `Shared by ${who(game.users.get(d.sharedBy)).name}`;
   if (d.author) return `By ${who(game.users.get(d.author)).name}`;
@@ -388,19 +436,18 @@ function metaline(d) {
   }
   if (d.kind === "journal") {
     const u = game.users.get(d.user);
-    return `${who(u).name}'s journal · private`;
+    return u ? `${who(u).name}'s journal · private` : "A former player's journal · private";
   }
   const by = d.sharedBy ? `Shared by ${who(game.users.get(d.sharedBy)).name}` : d.author ? `Written by ${who(game.users.get(d.author)).name}` : d.pinned ? "Pinned page" : "Party page";
   return d.editable ? `${by} · the party can edit it` : by;
 }
 
-const SEEN_KEY = `${MOD}.seen`;
 let seenCache;
 /** This player's map of entry id to the change time they last saw, or null before the first load. */
 function seenMap() {
   if (seenCache === undefined) {
     try {
-      seenCache = JSON.parse(localStorage.getItem(SEEN_KEY));
+      seenCache = JSON.parse(localStorage.getItem(storeKey("seen")));
     } catch {
       seenCache = null;
     }
@@ -410,19 +457,20 @@ function seenMap() {
 function saveSeen(map) {
   seenCache = map;
   try {
-    localStorage.setItem(SEEN_KEY, JSON.stringify(map));
+    localStorage.setItem(storeKey("seen"), JSON.stringify(map));
   } catch {
     /* no storage: markers last until the page reloads */
   }
 }
-/** When an entry or any of its pages last changed (the server's clock). */
+/** When an entry's content last changed (the server's clock): its pages, or the entry's making. Changes to the
+ * entry itself (pins, order, who has it, recap details) don't count, so they don't mark it Updated. */
 function stampOf(entry) {
-  return Math.max(entry._stats?.modifiedTime ?? 0, entry._stats?.createdTime ?? 0, ...entry.pages.contents.map((p) => p._stats?.modifiedTime ?? 0));
+  return Math.max(entry._stats?.createdTime ?? 0, ...entry.pages.contents.map((p) => Math.max(p._stats?.modifiedTime ?? 0, p._stats?.createdTime ?? 0)));
 }
-/** Who made an entry's latest change: the entry or whichever page changed last. */
+/** Who made an entry's latest content change: whoever last changed its newest page. */
 function lastBy(entry) {
-  let best = entry._stats;
-  for (const p of entry.pages.contents) if ((p._stats?.modifiedTime ?? 0) > (best?.modifiedTime ?? 0)) best = p._stats;
+  let best = null;
+  for (const p of entry.pages.contents) if (!best || (p._stats?.modifiedTime ?? 0) > (best.modifiedTime ?? 0)) best = p._stats;
   return best?.lastModifiedBy ?? null;
 }
 /** Whether something is new to this player: never for a GM or their own journal; not for their own changes. */
@@ -437,9 +485,22 @@ function markSeen(entry) {
   map[entry.id] = stamp;
   saveSeen(map);
 }
-/** On a player's first load, everything already there counts as seen, so the list doesn't open full of markers. */
+/** On a player's first load, everything already there counts as seen, so the list doesn't open full of markers.
+ * Later loads drop entries that no longer exist. */
 function seedSeen() {
-  if (game.user.isGM || seenMap()) return;
+  if (game.user.isGM) return;
+  try {
+    localStorage.removeItem(`${MOD}.seen`);
+    localStorage.removeItem(`${MOD}.view`);
+  } catch {
+    /* the old, shared keys */
+  }
+  const had = seenMap();
+  if (had) {
+    const kept = Object.fromEntries(Object.entries(had).filter(([id]) => game.journal.has(id)));
+    if (Object.keys(kept).length !== Object.keys(had).length) saveSeen(kept);
+    return;
+  }
   const map = {};
   for (const d of readable()) map[d.id] = stampOf(d.entry);
   saveSeen(map);
@@ -477,9 +538,15 @@ async function contentHTML(entry) {
   return parts.join("") || `<p class="bcj-hint">This entry has nothing to read yet.</p>`;
 }
 
-/** Plain text of an entry's readable pages, for search. */
+/** Plain text of an entry's readable pages, for search (secrets left out for players), kept until it changes. */
+const textCache = new Map();
 function textOf(entry) {
-  return entry.pages.contents.filter((p) => p.type === "text" && p.testUserPermission(game.user, "OBSERVER")).map((p) => stripTags(p.text?.content)).join(" ");
+  const stamp = stampOf(entry);
+  const hit = textCache.get(entry.id);
+  if (hit && hit.stamp === stamp) return hit.text;
+  const text = entry.pages.contents.filter((p) => p.type === "text" && p.testUserPermission(game.user, "OBSERVER")).map((p) => stripTags(visibleHTML(p))).join(" ");
+  textCache.set(entry.id, { stamp, text });
+  return text;
 }
 
 /* ------------------------------------------------------------------ */
@@ -497,14 +564,14 @@ function refresh() {
 
 function loadView() {
   try {
-    return JSON.parse(localStorage.getItem(VIEW_KEY)) ?? {};
+    return JSON.parse(localStorage.getItem(storeKey("view"))) ?? {};
   } catch {
     return {};
   }
 }
 function saveView(v) {
   try {
-    localStorage.setItem(VIEW_KEY, JSON.stringify({ tab: v.tab, entry: v.entry, sorts: v.sorts }));
+    localStorage.setItem(storeKey("view"), JSON.stringify({ tab: v.tab, entry: v.entry, sorts: v.sorts, folded: v.folded }));
   } catch {
     /* no storage: the view resets on reload */
   }
@@ -568,6 +635,8 @@ class JournalApp extends foundry.applications.api.ApplicationV2 {
       bcjExport: JournalApp.#onExport,
       bcjNewEntry: JournalApp.#onNewEntry,
       bcjSort: JournalApp.#onSort,
+      bcjFold: JournalApp.#onFold,
+      bcjReaders: JournalApp.#onReaders,
       bcjNewParty: JournalApp.#onNewParty,
       bcjEditing: JournalApp.#onEditing,
       bcjShare: JournalApp.#onShare,
@@ -578,7 +647,7 @@ class JournalApp extends foundry.applications.api.ApplicationV2 {
   constructor(options = {}) {
     super(foundry.utils.mergeObject({ position: loadSize() }, options));
     const saved = loadView();
-    this.view = { tab: saved.tab ?? "party", entry: saved.entry ?? null, query: "", sorts: saved.sorts && typeof saved.sorts === "object" ? { ...saved.sorts } : {} };
+    this.view = { tab: saved.tab ?? "party", entry: saved.entry ?? null, query: "", sorts: saved.sorts && typeof saved.sorts === "object" ? { ...saved.sorts } : {}, folded: saved.folded && typeof saved.folded === "object" ? { ...saved.folded } : {} };
     this.texts = new Map();
   }
 
@@ -622,13 +691,18 @@ class JournalApp extends foundry.applications.api.ApplicationV2 {
         ["Not given yet", h.filter((d) => !d.readers.length).sort(byName), null],
       ];
     }
-    // GM: one group per player, with their journal and the handouts only some players have.
-    return game.users.filter((u) => !u.isGM).sort((a, b) => a.name.localeCompare(b.name)).map((u) => [
+    // GM: one group per player, with their journal and the handouts only some players have; then the journals of
+    // players who are gone (their user deleted), so nothing is lost from view.
+    const current = game.users.filter((u) => !u.isGM).sort((a, b) => a.name.localeCompare(b.name));
+    const groups = current.map((u) => [
       who(u).name === u.name ? u.name : `${u.name} (${who(u).name})`,
       [...all.filter((d) => d.area === "player" && d.user === u.id), ...all.filter((d) => d.kind === "handout" && !d.all && d.readers.some((r) => r.id === u.id))].sort(orderFor("players")),
       "Nothing yet.",
       null,
     ]);
+    const former = all.filter((d) => d.area === "player" && !current.some((u) => u.id === d.user));
+    if (former.length) groups.push(["Former players", former.sort(orderFor("players")), null, null]);
+    return groups;
   }
 
   async _renderHTML() {
@@ -652,8 +726,13 @@ class JournalApp extends foundry.applications.api.ApplicationV2 {
     const sorter = (key) => this.view.sorts[key] === "az"
       ? `<a class="bcj-sort" data-action="bcjSort" data-sort="${key}" data-tooltip="Show the newest first"><i class="fa-solid fa-clock"></i> Newest</a>`
       : `<a class="bcj-sort" data-action="bcjSort" data-sort="${key}" data-tooltip="Sort by title"><i class="fa-solid fa-arrow-down-a-z"></i> A-Z</a>`;
-    const list = groups.map(([heading, items, empty, sortKey]) => `<div class="bcj-group" data-group="${esc(heading)}"><div class="bcj-gh"><span>${esc(heading)}</span>${sortKey ? sorter(sortKey) : ""}</div>${items.length ? items.map((d) => `<a class="bcj-item ${d.id === this.view.entry ? "active" : ""}" data-action="bcjEntry" data-entry="${esc(d.id)}">
-        <span class="bcj-it">${esc(d.name)}</span><span class="bcj-is">${mark(d)}${esc(subline(d))}</span><span class="bcj-iw">${dots(d)}</span></a>`).join("") : `<p class="bcj-none">${esc(empty)}</p>`}</div>`).join("");
+    // Any group folds to its heading (a long run of recaps, say); the choice is kept per tab and heading.
+    const foldKey = (heading) => `${this.view.tab}:${heading}`;
+    const list = groups.map(([heading, items, empty, sortKey]) => {
+      const folded = !!this.view.folded[foldKey(heading)];
+      return `<div class="bcj-group ${folded ? "bcj-folded" : ""}" data-group="${esc(heading)}"><div class="bcj-gh"><a class="bcj-fold" data-action="bcjFold" data-fold="${esc(foldKey(heading))}" data-tooltip="${folded ? "Show this group" : "Fold this group"}"><i class="fa-solid ${folded ? "fa-chevron-right" : "fa-chevron-down"}"></i> ${esc(heading)}${folded && items.length ? ` <span class="bcj-count">${items.length}</span>` : ""}</a>${sortKey ? sorter(sortKey) : ""}</div>${items.length ? items.map((d) => `<a class="bcj-item ${d.id === this.view.entry ? "active" : ""}" data-action="bcjEntry" data-entry="${esc(d.id)}">
+        <span class="bcj-it">${esc(d.name)}</span><span class="bcj-is">${mark(d)}${esc(subline(d))}</span><span class="bcj-iw">${dots(d)}</span></a>`).join("") : `<p class="bcj-none">${esc(empty)}</p>`}</div>`;
+    }).join("");
     const noFolders = this.isGM && !findFolder("root");
     // On the Players tab one toggle sorts every player's group, so it sits once, above them.
     const bar = this.isGM && this.view.tab === "players" && groups.length ? `<div class="bcj-gh bcj-listbar"><span>Every player's list</span>${sorter("players")}</div>` : "";
@@ -691,10 +770,11 @@ class JournalApp extends foundry.applications.api.ApplicationV2 {
     const mine = !gm && d.area === "player" && d.user === game.user.id && entry.isOwner;
     const copy = mine ? sharedCopyOf(entry.id, game.user.id) : null;
     const tools = [
-      gm && d.kind === "recap" ? B("bcjPrevious", "fa-solid fa-clock-rotate-left", "Previously on…", "Show the short version on every player's screen") : "",
+      gm && d.kind === "recap" ? B("bcjPrevious", "fa-solid fa-clock-rotate-left", "Previously on…", "Show the short version to the players who can read it") : "",
       gm && d.kind === "recap" ? B("bcjDetails", "fa-solid fa-sliders", "Details", "Session, dates and who was at the table") : "",
       gm && d.kind === "handout" ? B("bcjGive", "fa-solid fa-user-plus", "Give to…") : "",
       gm && (d.area === "party" || (d.kind === "handout" && d.all)) ? B("bcjPin", d.pinned ? "fa-solid fa-thumbtack-slash" : "fa-solid fa-thumbtack", d.pinned ? "Unpin" : "Pin", d.pinned ? "Put it back in its place in the party journal" : "Keep it at the top of the party journal") : "",
+      gm && d.area === "party" ? B("bcjReaders", d.all ? "fa-solid fa-eye-slash" : "fa-solid fa-users", d.all ? "Hide from players" : "Let players read it", d.all ? "Only GMs will see it (anyone you made Owner keeps it)" : "Every player can read it, players who join later too") : "",
       gm ? B("bcjShow", "fa-solid fa-eye", "Show to players", "Open it on the screens of the players who can read it") : "",
       mine ? B("bcjShare", "fa-solid fa-share-from-square", copy ? "Update the shared copy" : "Share a copy to the Party Journal", copy ? `Replace "${copy.name}" in the party journal with this version` : "Everyone will be able to read the copy; you can still edit it") : "",
       B("bcjMarkdown", "fa-solid fa-file-arrow-down", "Markdown", "Download this entry as a Markdown file"),
@@ -716,7 +796,15 @@ class JournalApp extends foundry.applications.api.ApplicationV2 {
     const scroll = content.querySelector(".bcj-read")?.scrollTop ?? 0;
     const listScroll = content.querySelector(".bcj-scroll")?.scrollTop ?? 0;
     const sameEntry = content.querySelector(".bcj-page")?.dataset.entry === this.view.entry;
+    // Someone typing in the search box keeps their place when a change elsewhere redraws the window.
+    const typing = document.activeElement?.name === "bcj-q" && content.contains(document.activeElement) ? document.activeElement : null;
+    const caret = typing ? [typing.selectionStart, typing.selectionEnd] : null;
     content.innerHTML = result;
+    if (typing) {
+      const input = content.querySelector('input[name="bcj-q"]');
+      input?.focus();
+      if (caret) input?.setSelectionRange(...caret);
+    }
     if (sameEntry) content.querySelector(".bcj-read").scrollTop = scroll;
     const ls = content.querySelector(".bcj-scroll");
     if (ls) ls.scrollTop = listScroll;
@@ -841,6 +929,8 @@ class JournalApp extends foundry.applications.api.ApplicationV2 {
     }
     const none = el.querySelector(".bcj-nomatch");
     if (none) none.hidden = !q || any;
+    // While searching, matches show even in folded groups.
+    el.querySelector(".bcj-scroll")?.classList.toggle("bcj-searching", !!q);
   }
 
   static #onTab(event, target) {
@@ -875,8 +965,12 @@ class JournalApp extends foundry.applications.api.ApplicationV2 {
 
   static #onFolders() {
     ui.sidebar?.changeTab?.("journal", "primary");
-    const root = findFolder("root");
-    if (root) game.folders.get(root.id)?.expand?.();
+    // Foundry 14 keeps open folders in game.folders._expanded, by folder uuid.
+    for (const role of ["root", "party", "handouts", "players"]) {
+      const f = findFolder(role);
+      if (f && game.folders._expanded) game.folders._expanded[f.uuid] = true;
+    }
+    ui.journal?.render();
   }
 
   static async #onNewRecap() {
@@ -1064,6 +1158,21 @@ class JournalApp extends foundry.applications.api.ApplicationV2 {
     askGM({ type: "edit", entry: entry.id, on }, "Campaign Journal: a GM needs to be logged in to change who can edit it.");
   }
 
+  static async #onReaders() {
+    const entry = game.journal.get(this.view.entry);
+    const d = entry && describe(entry);
+    if (!this.isGM || !d || d.area !== "party") return;
+    await entry.update({ ownership: { default: d.all ? LEVEL.NONE : LEVEL.OBSERVER } });
+  }
+
+  static #onFold(event, target) {
+    const key = target.dataset.fold;
+    if (!key) return;
+    if (this.view.folded[key]) delete this.view.folded[key];
+    else this.view.folded[key] = true;
+    this.render();
+  }
+
   static #onSort(event, target) {
     const key = target.dataset.sort;
     if (!["mine", "myHandouts", "players"].includes(key)) return;
@@ -1129,7 +1238,7 @@ function entryMarkdown(d, level = 1) {
     if (pages.length > 1) parts.push(`${hashes}# ${p.name}`);
     // The page's own headings go below the entry's title (and its page names, if it has several).
     const shift = level - 1 + (pages.length > 1 ? 1 : 0);
-    parts.push(shiftHeadings(html2md(p.text?.content ?? ""), shift));
+    parts.push(shiftHeadings(html2md(visibleHTML(p)), shift));
   }
   return parts.filter(Boolean).join("\n\n");
 }
@@ -1140,7 +1249,7 @@ const checkboxes = (name, list, checked) => list.map((u) => `<label class="bcj-c
 async function recapDialog(v, { create }) {
   const form = `<div class="bcj-form">
     <div class="bcj-row"><label>Session <input type="number" name="session" min="0" value="${esc(v.session ?? "")}"></label><label class="bcj-grow">Title <input type="text" name="title" value="${esc(v.title ?? "")}" placeholder="${create ? "Taken from the file if left blank" : ""}"></label></div>
-    <div class="bcj-row"><label>In-game date <input type="text" name="date" value="${esc(fmtDate(v.date))}" placeholder="14 Aten 1534"></label><label>Played <input type="text" name="played" value="${esc(v.played ?? "")}" placeholder="Sat 8 Nov"></label></div>
+    <div class="bcj-row"><label>In-game date <input type="text" name="date" value="${esc(fmtDate(v.date))}" placeholder="${esc(fmtDate(today()))}"></label><label>Played <input type="text" name="played" value="${esc(v.played ?? "")}" placeholder="Sat 8 Nov"></label></div>
     <label>Line under the title <input type="text" name="subtitle" value="${esc(v.subtitle ?? "")}" placeholder="${create ? "Taken from the file if left blank; otherwise the session, dates and who played" : "Session, dates and who played if left blank"}"></label>
     <fieldset><legend>At the table</legend>${checkboxes("attended", players(), v.attended ?? []) || `<p class="bcj-dim">No players yet.</p>`}</fieldset>
     ${create ? `<label>Recap (Markdown) <textarea name="md" rows="9" placeholder="Paste the recap here, or import the file. Leave it empty for a blank recap to write in."></textarea></label>
@@ -1188,9 +1297,13 @@ async function recapDialog(v, { create }) {
     buttons: [
       { action: "ok", label: create ? "Make the recap" : "Save", icon: "fa-solid fa-check", default: true, callback: (event, button) => {
         const e = button.form.elements;
-        const date = parseDate(e.date.value);
-        if (date === undefined) {
-          ui.notifications.warn(`Campaign Journal: "${e.date.value}" isn't a date the calendar knows; it was left out.`);
+        const typed = e.date.value.trim();
+        let date = parseDate(typed);
+        // An untouched field keeps the stored date, even if the calendar can't read its own text back.
+        if (!create && v.date && typed === fmtDate(v.date)) date = v.date;
+        else if (date === undefined) {
+          ui.notifications.warn(`Campaign Journal: "${typed}" isn't a date the calendar knows; ${create || !v.date ? "it was left out" : "the date was kept as it was"}.`);
+          date = create ? null : v.date ?? null;
         }
         return {
           session: e.session.value === "" ? null : Number(e.session.value),
@@ -1283,13 +1396,25 @@ function sharedCopyOf(sourceId, userId) {
 }
 
 /** A player asks the GM's client to do something they may not have the rights for. */
+const pending = new Map();
 function askGM(msg, offline = "Campaign Journal: a GM needs to be logged in for that.") {
   if (!game.users.activeGM) {
     ui.notifications.warn(offline);
     return false;
   }
-  game.socket.emit(SOCKET, msg);
+  const rid = foundry.utils.randomID(12);
+  pending.set(rid, setTimeout(() => {
+    pending.delete(rid);
+    ui.notifications.warn("Campaign Journal: the GM's client didn't answer. Try again in a moment.");
+  }, 10000));
+  game.socket.emit(SOCKET, { ...msg, rid });
   return true;
+}
+/** A GM's answer came: stop waiting for it. */
+function answered(rid) {
+  if (!rid || !pending.has(rid)) return;
+  clearTimeout(pending.get(rid));
+  pending.delete(rid);
 }
 
 /** A journal action for a player that can't be done (the user is told why). */
@@ -1318,17 +1443,21 @@ async function shareCopy(user, sourceId) {
   if (!d || d.area !== "player" || d.user !== user.id || !source.testUserPermission(user, "OWNER")) throw new Refused("only an entry in your own journal can be shared.");
   const party = findFolder("party");
   if (!party) throw new Refused("the party journal isn't there yet. Ask the GM.");
-  const pages = source.pages.contents.sort((a, b) => a.sort - b.sort).map((page) => {
+  // Only the pages the player may read go into the copy (a GM note page hidden from them stays out).
+  const pages = source.pages.contents.filter((page) => page.testUserPermission(user, "OBSERVER")).sort((a, b) => a.sort - b.sort).map((page) => {
     const data = page.toObject();
     delete data._id;
     data.ownership = { default: LEVEL.INHERIT };
     return data;
   });
   let copy = sharedCopyOf(source.id, user.id);
+  if (copy && !copy.testUserPermission(user, "OWNER")) throw new Refused("the shared copy isn't yours to change any more. Ask the GM.");
   if (copy) {
+    // The new pages go in before the old ones go, so a failure never leaves the copy empty.
+    const old = copy.pages.map((pg) => pg.id);
     await copy.update({ name: source.name });
-    await copy.deleteEmbeddedDocuments("JournalEntryPage", copy.pages.map((pg) => pg.id));
     await copy.createEmbeddedDocuments("JournalEntryPage", pages);
+    if (old.length) await copy.deleteEmbeddedDocuments("JournalEntryPage", old);
   } else {
     copy = await JournalEntry.create({ name: source.name, folder: party.id, ownership: { default: LEVEL.OBSERVER, [user.id]: LEVEL.OWNER }, flags: { [MOD]: { sharedFrom: source.id, sharedBy: user.id } }, pages });
   }
@@ -1367,7 +1496,7 @@ async function playerDo(msg) {
 
 /** The active GM's client acts on a player's request: a new entry, a party entry, who can edit, or a shared copy. */
 async function onRequest(msg, sender) {
-  const reply = (extra) => game.socket.emit(SOCKET, { users: [sender.id], ...extra });
+  const reply = (extra) => game.socket.emit(SOCKET, { users: [sender.id], rid: typeof msg.rid === "string" ? msg.rid : null, ...extra });
   try {
     if (msg.type === "create") {
       await ensureFolders();
@@ -1379,7 +1508,8 @@ async function onRequest(msg, sender) {
     } else if (msg.type === "edit") {
       const entry = game.journal.get(msg.entry);
       const d = entry && describe(entry);
-      if (!d || d.area !== "party" || !d.all || d.author !== sender.id || !entry.testUserPermission(sender, "OWNER")) return reply({ type: "fail", text: "Campaign Journal: only the player who wrote it, or the GM, can change who edits it." });
+      // The flag can be rewritten by anyone who may edit the entry; an Owner entry under the player's own name can't.
+      if (!d || d.area !== "party" || !d.all || d.author !== sender.id || entry.ownership?.[sender.id] !== LEVEL.OWNER) return reply({ type: "fail", text: "Campaign Journal: only the player who wrote it, or the GM, can change who edits it." });
       await entry.update({ ownership: editOwnership(!!msg.on, sender.id) });
       reply({ type: "done", what: "edit", entry: entry.id, on: !!msg.on });
     } else if (msg.type === "share") {
@@ -1399,11 +1529,17 @@ function onSocket(msg, senderId) {
   if (!msg?.type) return;
   const sender = game.users.get(senderId);
   if (game.user.isGM) {
-    if (isPrimaryGM() && sender && !sender.isGM && ["create", "party", "edit", "share"].includes(msg.type)) onRequest(msg, sender);
+    if (msg.type === "gmtab" && sender?.id === game.user.id && typeof msg.client === "string") {
+      gmTabs.set(msg.client, Date.now());
+      if (msg.hello) announceTab(false);
+    } else if (msg.type === "gmbye" && sender?.id === game.user.id) gmTabs.delete(msg.client);
+    else if (sender && !sender.isGM && ["create", "party", "edit", "share"].includes(msg.type) && iAmLeader()) onRequest(msg, sender);
     return;
   }
   if (!sender?.isGM) return;
   if (Array.isArray(msg.users) && !msg.users.includes(game.user.id)) return;
+  if (msg.type === "gmtab" || msg.type === "gmbye") return;
+  if (msg.type === "done" || msg.type === "fail") answered(msg.rid);
   if (msg.type === "fail") return ui.notifications.warn(String(msg.text ?? "Campaign Journal: that didn't work."));
   const act = () => {
     const entry = game.journal.get(msg.entry);
@@ -1467,7 +1603,13 @@ function start() {
   game.modules.get(MOD).api = { open: (entryId) => JournalApp.open(entryId), refresh };
   game.socket.on(SOCKET, onSocket);
   seedSeen();
-  ensureFolders();
+  if (game.user.isGM) {
+    announceTab(true);
+    setInterval(() => announceTab(false), 15000);
+    window.addEventListener("beforeunload", () => game.socket.emit(SOCKET, { type: "gmbye", client: CLIENT_ID }));
+    // Give other tabs of this GM a moment to answer before deciding which one makes the folders.
+    setTimeout(() => ensureFolders(), 1500);
+  }
   const dir = ui.journal ?? ui.sidebar?.tabs?.journal;
   if (dir?.element) addDirectoryButton(dir, dir.element);
 }
@@ -1498,7 +1640,12 @@ Hooks.on("updateJournalEntryPage", (page, change, options, userId) => {
 // A calendar module may set the calendar up after ready; draw dates again once it has.
 Hooks.on("calendaria.ready", () => refresh());
 Hooks.on("calendaria.calendarSwitched", () => refresh());
-for (const hook of ["createJournalEntry", "updateJournalEntry", "deleteJournalEntry", "createJournalEntryPage", "updateJournalEntryPage", "deleteJournalEntryPage", "createFolder", "updateFolder", "deleteFolder"]) Hooks.on(hook, refresh);
+// Redraw for changes to the journal's own entries and folders only, not every journal in the world.
+const inJournal = (entry) => !!(entry && areaOf(entry.folder));
+for (const hook of ["createJournalEntry", "deleteJournalEntry"]) Hooks.on(hook, (entry) => inJournal(entry) && refresh());
+Hooks.on("updateJournalEntry", (entry, change) => (inJournal(entry) || "folder" in change) && refresh());
+for (const hook of ["createJournalEntryPage", "updateJournalEntryPage", "deleteJournalEntryPage"]) Hooks.on(hook, (page) => inJournal(page.parent) && refresh());
+for (const hook of ["createFolder", "updateFolder", "deleteFolder"]) Hooks.on(hook, (folder) => folder.type === "JournalEntry" && refresh());
 Hooks.on("createJournalEntry", (entry) => noticeNew(entry));
 Hooks.on("updateJournalEntry", (entry, change) => {
   if ("ownership" in change || "folder" in change) noticeNew(entry);
@@ -1506,6 +1653,9 @@ Hooks.on("updateJournalEntry", (entry, change) => {
 // A folder that appears later (the first GM login) is hidden from players too.
 Hooks.on("createFolder", () => {
   if (!game.user.isGM) ui.journal?.render();
+});
+Hooks.on("deleteFolder", (folder) => {
+  if (roleOf(folder)) ensureFolders();
 });
 Hooks.on("createUser", () => {
   ensureFolders();
@@ -1527,4 +1677,4 @@ if (globalThis.game?.ready) {
   start();
 }
 
-export { kindFor, levelFor, readersOf, compareRecaps, matches, stripTags, esc, KINDS, parseRecap, recapName, ownershipFor, slug, splitDetails, shiftHeadings, freshnessOf, freshFor, editOwnership, partyEdits, comparePinned, moveId, byNewest, byName, titleKey };
+export { kindFor, levelFor, readersOf, compareRecaps, matches, stripTags, esc, KINDS, parseRecap, recapName, ownershipFor, slug, splitDetails, shiftHeadings, freshnessOf, freshFor, editOwnership, partyEdits, comparePinned, moveId, byNewest, byName, titleKey, months, parseDate, fmtDate, visibleHTML, gmTabInfo };
