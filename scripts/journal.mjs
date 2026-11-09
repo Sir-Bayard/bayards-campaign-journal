@@ -209,7 +209,8 @@ function describe(entry) {
   if (!where) return null;
   const f = flagsOf(entry);
   const kind = kindFor(where.area, f.kind);
-  const { readers, all } = readersOf(entry.ownership, game.users.contents);
+  const { readers: found, all } = readersOf(entry.ownership, game.users.contents);
+  const readers = found.sort((a, b) => who(a).name.localeCompare(who(b).name));
   return { entry, id: entry.id, name: entry.name, kind, area: where.area, user: where.user, pinned: !!f.pinned, sharedBy: f.sharedBy ?? null, sharedFrom: f.sharedFrom ?? null, subtitle: f.subtitle ?? "", session: f.session ?? null, date: f.date ?? null, played: f.played ?? null, attended: Array.isArray(f.attended) ? f.attended : [], readers, all, sort: entry.sort ?? 0 };
 }
 
@@ -225,6 +226,12 @@ function readable() {
 }
 
 const byName = (a, b) => (a.sort - b.sort) || a.name.localeCompare(b.name);
+
+/** Names as a list: "Vance", "Vance and Mira", "Vance, Mira and Kestrel". */
+function listOf(names) {
+  if (names.length <= 2) return names.join(" and ");
+  return `${names.slice(0, -1).join(", ")} and ${names.at(-1)}`;
+}
 
 /** A short name and initial for a user: their character's name if they have one. */
 function who(user) {
@@ -332,7 +339,7 @@ function metaline(d) {
     return [d.session ? `Session ${d.session}` : "Session recap", fmtDate(d.date), played].filter(Boolean).join(" · ");
   }
   if (d.kind === "handout") {
-    const to = d.all ? "everyone" : d.readers.map((u) => who(u).name).join(" and ") || "no one yet";
+    const to = d.all ? "everyone" : listOf(d.readers.map((u) => who(u).name)) || "no one yet";
     return `Handout · for ${to}`;
   }
   if (d.kind === "journal") {
@@ -469,6 +476,7 @@ class JournalApp extends foundry.applications.api.ApplicationV2 {
       bcjFolders: JournalApp.#onFolders,
       bcjNewRecap: JournalApp.#onNewRecap,
       bcjNewHandout: JournalApp.#onNewHandout,
+      bcjNewPage: JournalApp.#onNewPage,
       bcjDetails: JournalApp.#onDetails,
       bcjPin: JournalApp.#onPin,
       bcjGive: JournalApp.#onGive,
@@ -503,12 +511,14 @@ class JournalApp extends foundry.applications.api.ApplicationV2 {
   /** A tab's groups (the current tab unless named): [heading, entries, empty text]. */
   groups(all, tab = this.view.tab) {
     if (tab === "party") {
+      // Anything on this tab can be pinned to the top: pages, recaps, shared copies, handouts for everyone.
       const party = all.filter((d) => d.area === "party");
+      const handouts = all.filter((d) => d.kind === "handout" && d.all);
       return [
-        ["Pinned", party.filter((d) => d.pinned && d.kind !== "recap").sort(byName), null],
-        ["Recaps", party.filter((d) => d.kind === "recap").sort(compareRecaps), "No recaps yet."],
-        ["Pages", party.filter((d) => !d.pinned && d.kind !== "recap").sort(byName), null],
-        ["Handouts for everyone", all.filter((d) => d.kind === "handout" && d.all).sort(byName), null],
+        ["Pinned", [...party, ...handouts].filter((d) => d.pinned).sort(byName), null],
+        ["Recaps", party.filter((d) => d.kind === "recap" && !d.pinned).sort(compareRecaps), "No recaps yet."],
+        ["Pages", party.filter((d) => d.kind !== "recap" && !d.pinned).sort(byName), null],
+        ["Handouts for everyone", handouts.filter((d) => !d.pinned).sort(byName), null],
       ];
     }
     if (tab === "mine") {
@@ -560,7 +570,7 @@ class JournalApp extends foundry.applications.api.ApplicationV2 {
       <nav class="bcj-rail">${rail}<div class="bcj-railfoot"><a data-action="bcjExport" data-tooltip="Download this tab's entries as one Markdown file"><i class="fa-solid fa-file-export"></i><span>Export</span></a>${this.isGM ? `<a data-action="bcjFolders" data-tooltip="Show the journal's folders in the Journal tab"><i class="fa-solid fa-folder-tree"></i><span>Folders</span></a>` : ""}</div></nav>
       <section class="bcj-list">
         <div class="bcj-search"><i class="fa-solid fa-magnifying-glass"></i><input type="search" name="bcj-q" placeholder="Search the journal" value="${esc(this.view.query)}"></div>
-        ${this.isGM ? `<div class="bcj-actions"><button type="button" data-action="bcjNewRecap"><i class="fa-solid fa-plus"></i> New recap</button><button type="button" data-action="bcjNewHandout"><i class="fa-solid fa-envelope-open-text"></i> New handout</button></div>` : this.view.tab === "mine" ? `<div class="bcj-actions"><button type="button" data-action="bcjNewEntry"><i class="fa-solid fa-feather"></i> New entry</button></div>` : ""}
+        ${this.isGM ? `<div class="bcj-actions"><button type="button" data-action="bcjNewRecap" data-tooltip="New session recap"><i class="fa-solid fa-plus"></i> Recap</button><button type="button" data-action="bcjNewHandout" data-tooltip="New handout"><i class="fa-solid fa-plus"></i> Handout</button><button type="button" data-action="bcjNewPage" data-tooltip="New page in the party journal, such as Lines and Veils or house rules"><i class="fa-solid fa-plus"></i> Page</button></div>` : this.view.tab === "mine" ? `<div class="bcj-actions"><button type="button" data-action="bcjNewEntry"><i class="fa-solid fa-feather"></i> New entry</button></div>` : ""}
         <div class="bcj-scroll">${noFolders ? `<p class="bcj-none">The journal's folders are being made.</p>` : listBody}<p class="bcj-none bcj-nomatch" hidden>Nothing matches.</p></div>
       </section>
       <section class="bcj-read">${current ? await this.#page(current) : this.#empty()}</section>
@@ -591,7 +601,7 @@ class JournalApp extends foundry.applications.api.ApplicationV2 {
       gm && d.kind === "recap" ? B("bcjPrevious", "fa-solid fa-clock-rotate-left", "Previously on…", "Show the short version on every player's screen") : "",
       gm && d.kind === "recap" ? B("bcjDetails", "fa-solid fa-sliders", "Details", "Session, dates and who was at the table") : "",
       gm && d.kind === "handout" ? B("bcjGive", "fa-solid fa-user-plus", "Give to…") : "",
-      gm && d.kind === "page" ? B("bcjPin", d.pinned ? "fa-solid fa-thumbtack-slash" : "fa-solid fa-thumbtack", d.pinned ? "Unpin" : "Pin", d.pinned ? "Move it back among the pages" : "Keep it at the top of the party journal") : "",
+      gm && (d.area === "party" || (d.kind === "handout" && d.all)) ? B("bcjPin", d.pinned ? "fa-solid fa-thumbtack-slash" : "fa-solid fa-thumbtack", d.pinned ? "Unpin" : "Pin", d.pinned ? "Put it back in its place in the party journal" : "Keep it at the top of the party journal") : "",
       gm ? B("bcjShow", "fa-solid fa-eye", "Show to players", "Open it on the screens of the players who can read it") : "",
       mine ? B("bcjShare", "fa-solid fa-share-from-square", copy ? "Update the shared copy" : "Share a copy to the Party Journal", copy ? `Replace "${copy.name}" in the party journal with this version` : "Everyone will be able to read the copy; you can still edit it") : "",
       B("bcjMarkdown", "fa-solid fa-file-arrow-down", "Markdown", "Download this entry as a Markdown file"),
@@ -735,6 +745,39 @@ class JournalApp extends foundry.applications.api.ApplicationV2 {
     await entry.update(update);
     const page = entry.pages.contents.length === 1 ? entry.pages.contents[0] : null;
     if (page && update.name && page.name !== name) await page.update({ name });
+  }
+
+  static async #onNewPage() {
+    if (!this.isGM) return;
+    const party = findFolder("party");
+    if (!party) return ui.notifications.warn("Campaign Journal: the Party folder isn't there yet.");
+    const data = await DialogV2().wait({
+      window: { title: "New page", icon: "fa-solid fa-file-lines" },
+      classes: ["bcj-dialog"],
+      position: { width: 420 },
+      content: `<div class="bcj-form"><label>Title <input type="text" name="name" placeholder="House rules" autofocus></label>
+        <label class="bcj-check"><input type="checkbox" name="pinned"> Pin it to the top of the party journal</label>
+        <label class="bcj-check"><input type="checkbox" name="share" checked> Players can read it now</label></div>`,
+      buttons: [
+        { action: "ok", label: "Make it", icon: "fa-solid fa-check", default: true, callback: (event, button) => {
+          const e = button.form.elements;
+          return { name: e.name.value.trim(), pinned: e.pinned.checked, share: e.share.checked };
+        } },
+        { action: "cancel", label: "Cancel" },
+      ],
+      rejectClose: false,
+    });
+    if (!data || typeof data !== "object" || !data.name) return;
+    const entry = await JournalEntry.create({
+      name: data.name, folder: party.id, ownership: { default: data.share ? LEVEL.OBSERVER : LEVEL.NONE },
+      flags: { [MOD]: { pinned: data.pinned } },
+      pages: [{ name: data.name, type: "text", text: { content: "", format: 1 } }],
+    });
+    if (!entry) return;
+    this.view.tab = "party";
+    this.view.entry = entry.id;
+    this.render();
+    entry.pages.contents[0]?.sheet.render(true);
   }
 
   static async #onNewHandout() {

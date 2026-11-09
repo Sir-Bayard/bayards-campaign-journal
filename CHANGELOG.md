@@ -10,7 +10,7 @@
 - Recap details: change a recap's session, dates, line under the title and who was there.
 - New handout, starting from a letter layout, and Give to… for everyone or chosen players (everyone means players who join later too).
 - Show to players opens an entry on the screens of the players who can read it. "Previously on…" shows a recap's short version on every player's screen, with a button to read the rest.
-- Pin a party page to the top of the party journal.
+- New page, for party pages such as house rules, optionally pinned. Pin anything on the Party tab to the top: pages, recaps, shared copies and handouts for everyone.
 - Markdown: download an entry, or the whole tab with Export.
 - Players write their own entries (New entry, then Foundry's editor); only they and the GM can read them. A GM's client makes the entry, so players don't need the right to create journal entries.
 - Share a copy to the Party Journal: a copy signed "Shared by" the player, which everyone can read and the player can still edit. Sharing the same entry again asks first, then replaces the earlier copy in place.
