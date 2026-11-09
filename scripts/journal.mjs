@@ -485,6 +485,36 @@ function saveView(v) {
   }
 }
 
+const SIZE_KEY = `${MOD}.size`;
+/** The window's last size and place in this browser, kept inside the screen. */
+function loadSize() {
+  let v;
+  try {
+    v = JSON.parse(localStorage.getItem(SIZE_KEY));
+  } catch {
+    return {};
+  }
+  if (!v || typeof v !== "object") return {};
+  const out = {};
+  const W = window.innerWidth, H = window.innerHeight;
+  if (Number.isFinite(v.width)) out.width = Math.max(640, Math.min(v.width, W));
+  if (Number.isFinite(v.height)) out.height = Math.max(420, Math.min(v.height, H));
+  if (Number.isFinite(v.left)) out.left = Math.max(0, Math.min(v.left, W - (out.width ?? 640)));
+  if (Number.isFinite(v.top)) out.top = Math.max(0, Math.min(v.top, H - (out.height ?? 420)));
+  return out;
+}
+let sizeTimer = null;
+function saveSize(pos) {
+  clearTimeout(sizeTimer);
+  sizeTimer = setTimeout(() => {
+    try {
+      localStorage.setItem(SIZE_KEY, JSON.stringify({ width: pos.width, height: pos.height, left: pos.left, top: pos.top }));
+    } catch {
+      /* no storage: the window opens at its default size */
+    }
+  }, 300);
+}
+
 class JournalApp extends foundry.applications.api.ApplicationV2 {
   static DEFAULT_OPTIONS = {
     id: MOD,
@@ -518,7 +548,7 @@ class JournalApp extends foundry.applications.api.ApplicationV2 {
   };
 
   constructor(options = {}) {
-    super(options);
+    super(foundry.utils.mergeObject({ position: loadSize() }, options));
     const saved = loadView();
     this.view = { tab: saved.tab ?? "party", entry: saved.entry ?? null, query: "" };
     this.texts = new Map();
@@ -662,6 +692,14 @@ class JournalApp extends foundry.applications.api.ApplicationV2 {
 
   _onClose() {
     openApps.delete(this);
+  }
+
+  /** Remember the size and place the user gives the window (not while it's minimized). */
+  _onPosition(position) {
+    super._onPosition?.(position);
+    if (!this.rendered || this.minimized) return;
+    if (![position.width, position.height, position.left, position.top].every(Number.isFinite)) return;
+    saveSize(position);
   }
 
   _onRender() {
