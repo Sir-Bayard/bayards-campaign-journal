@@ -228,7 +228,7 @@ function describe(entry) {
   const kind = kindFor(where.area, f.kind);
   const { readers: found, all } = readersOf(entry.ownership, game.users.contents);
   const readers = found.sort((a, b) => who(a).name.localeCompare(who(b).name));
-  return { entry, id: entry.id, name: entry.name, kind, area: where.area, user: where.user, pinned: !!f.pinned, sharedBy: f.sharedBy ?? null, sharedFrom: f.sharedFrom ?? null, author: f.author ?? f.sharedBy ?? null, editable: partyEdits(entry.ownership), subtitle: f.subtitle ?? "", session: f.session ?? null, date: f.date ?? null, played: f.played ?? null, attended: Array.isArray(f.attended) ? f.attended : [], readers, all, sort: entry.sort ?? 0 };
+  return { entry, id: entry.id, name: entry.name, kind, area: where.area, user: where.user, pinned: !!f.pinned, pinOrder: Number.isFinite(f.pinOrder) ? f.pinOrder : null, sharedBy: f.sharedBy ?? null, sharedFrom: f.sharedFrom ?? null, author: f.author ?? f.sharedBy ?? null, editable: partyEdits(entry.ownership), subtitle: f.subtitle ?? "", session: f.session ?? null, date: f.date ?? null, played: f.played ?? null, attended: Array.isArray(f.attended) ? f.attended : [], readers, all, sort: entry.sort ?? 0 };
 }
 
 /** Every journal entry this user can read. */
@@ -243,6 +243,24 @@ function readable() {
 }
 
 const byName = (a, b) => (a.sort - b.sort) || a.name.localeCompare(b.name);
+
+/** Pinned entries in the GM's order; any without a place yet (pinned before ordering existed) after them, by name. */
+function comparePinned(a, b) {
+  const pa = Number.isFinite(a.pinOrder) ? a.pinOrder : null;
+  const pb = Number.isFinite(b.pinOrder) ? b.pinOrder : null;
+  if (pa !== null && pb !== null && pa !== pb) return pa - pb;
+  if (pa !== null && pb === null) return -1;
+  if (pa === null && pb !== null) return 1;
+  return byName(a, b);
+}
+
+/** Move one id in a list to before (or after) another; the list unchanged when either is missing. */
+function moveId(ids, id, target, after = false) {
+  if (id === target || !ids.includes(id) || !ids.includes(target)) return [...ids];
+  const out = ids.filter((x) => x !== id);
+  out.splice(out.indexOf(target) + (after ? 1 : 0), 0, id);
+  return out;
+}
 
 /** Names as a list: "Vance", "Vance and Mira", "Vance, Mira and Kestrel". */
 function listOf(names) {
@@ -574,7 +592,7 @@ class JournalApp extends foundry.applications.api.ApplicationV2 {
       const party = all.filter((d) => d.area === "party");
       const handouts = all.filter((d) => d.kind === "handout" && d.all);
       return [
-        ["Pinned", [...party, ...handouts].filter((d) => d.pinned).sort(byName), null],
+        ["Pinned", [...party, ...handouts].filter((d) => d.pinned).sort(comparePinned), null],
         ["Recaps", party.filter((d) => d.kind === "recap" && !d.pinned).sort(compareRecaps), "No recaps yet."],
         ["Pages", party.filter((d) => d.kind !== "recap" && !d.pinned).sort(byName), null],
         ["Handouts for everyone", handouts.filter((d) => !d.pinned).sort(byName), null],
@@ -620,7 +638,7 @@ class JournalApp extends foundry.applications.api.ApplicationV2 {
     };
     const unseenIn = (k) => !this.isGM && this.groups(all, k).some(([, items]) => items.some((d) => freshness(d)));
     const rail = tabs.map(([k, label, icon]) => `<a class="bcj-tab ${k === this.view.tab ? "active" : ""}" data-action="bcjTab" data-tab="${k}"><i class="${icon}"></i><span>${label}</span>${unseenIn(k) ? `<i class="bcj-dotnew" data-tooltip="Something new"></i>` : ""}</a>`).join("");
-    const list = groups.map(([heading, items, empty]) => `<div class="bcj-group"><div class="bcj-gh">${esc(heading)}</div>${items.length ? items.map((d) => `<a class="bcj-item ${d.id === this.view.entry ? "active" : ""}" data-action="bcjEntry" data-entry="${esc(d.id)}">
+    const list = groups.map(([heading, items, empty]) => `<div class="bcj-group" data-group="${esc(heading)}"><div class="bcj-gh">${esc(heading)}</div>${items.length ? items.map((d) => `<a class="bcj-item ${d.id === this.view.entry ? "active" : ""}" data-action="bcjEntry" data-entry="${esc(d.id)}">
         <span class="bcj-it">${esc(d.name)}</span><span class="bcj-is">${mark(d)}${esc(subline(d))}</span><span class="bcj-iw">${dots(d)}</span></a>`).join("") : `<p class="bcj-none">${esc(empty)}</p>`}</div>`).join("");
     const noFolders = this.isGM && !findFolder("root");
     const listBody = shown.length || groups.length ? list : "";
@@ -735,12 +753,58 @@ class JournalApp extends foundry.applications.api.ApplicationV2 {
       toc.innerHTML = `<div class="bcj-k">On this page</div>${heads.map((h, i) => `<a data-action="bcjToc" data-head="${i}" class="bcj-toc-${h.tagName.toLowerCase()}">${esc(h.textContent.trim())}</a>`).join("")}`;
       toc.hidden = false;
     }
+    this.#dragPins();
     const input = el.querySelector('input[name="bcj-q"]');
     input?.addEventListener("input", () => {
       this.view.query = input.value;
       this.#filter();
     });
     this.#filter();
+  }
+
+  /** The GM drags pinned entries up and down; the order is saved on the entries for everyone. */
+  #dragPins() {
+    if (!this.isGM) return;
+    const group = this.element.querySelector('.bcj-group[data-group="Pinned"]');
+    const items = group ? [...group.querySelectorAll(".bcj-item")] : [];
+    if (items.length < 2) return;
+    const clear = () => items.forEach((a) => a.classList.remove("bcj-drop-before", "bcj-drop-after", "bcj-dragging"));
+    let dragged = null;
+    for (const a of items) {
+      a.draggable = true;
+      a.addEventListener("dragstart", (ev) => {
+        if (this.view.query) return ev.preventDefault();
+        dragged = a.dataset.entry;
+        ev.dataTransfer.effectAllowed = "move";
+        ev.dataTransfer.setData("text/plain", dragged);
+        a.classList.add("bcj-dragging");
+      });
+      a.addEventListener("dragover", (ev) => {
+        if (!dragged || a.dataset.entry === dragged) return;
+        ev.preventDefault();
+        ev.dataTransfer.dropEffect = "move";
+        const r = a.getBoundingClientRect();
+        const after = ev.clientY > r.top + r.height / 2;
+        items.forEach((b) => b !== a && b.classList.remove("bcj-drop-before", "bcj-drop-after"));
+        a.classList.toggle("bcj-drop-after", after);
+        a.classList.toggle("bcj-drop-before", !after);
+      });
+      a.addEventListener("dragleave", () => a.classList.remove("bcj-drop-before", "bcj-drop-after"));
+      a.addEventListener("drop", (ev) => {
+        if (!dragged) return;
+        ev.preventDefault();
+        const after = a.classList.contains("bcj-drop-after");
+        const ids = moveId(items.map((b) => b.dataset.entry), dragged, a.dataset.entry, after);
+        dragged = null;
+        clear();
+        JournalEntry.updateDocuments(ids.map((id, i) => ({ _id: id, [`flags.${MOD}.pinOrder`]: i })))
+          .catch((err) => ui.notifications.warn(`Campaign Journal: couldn't save the order (${err.message}).`));
+      });
+      a.addEventListener("dragend", () => {
+        dragged = null;
+        clear();
+      });
+    }
   }
 
   /** Hide list entries that don't match the search, and groups left empty. */
@@ -899,7 +963,9 @@ class JournalApp extends foundry.applications.api.ApplicationV2 {
   static async #onPin() {
     const entry = game.journal.get(this.view.entry);
     if (!this.isGM || !entry) return;
-    await entry.setFlag(MOD, "pinned", !flagsOf(entry).pinned);
+    if (flagsOf(entry).pinned) return entry.update({ [`flags.${MOD}.pinned`]: false, [`flags.${MOD}.-=pinOrder`]: null });
+    const last = Math.max(-1, ...readable().filter((d) => d.pinned && Number.isFinite(d.pinOrder)).map((d) => d.pinOrder));
+    await entry.update({ [`flags.${MOD}.pinned`]: true, [`flags.${MOD}.pinOrder`]: last + 1 });
   }
 
   static #onShow() {
@@ -1386,4 +1452,4 @@ if (globalThis.game?.ready) {
   start();
 }
 
-export { kindFor, levelFor, readersOf, compareRecaps, matches, stripTags, esc, KINDS, parseRecap, recapName, ownershipFor, slug, splitDetails, shiftHeadings, freshnessOf, freshFor, editOwnership, partyEdits };
+export { kindFor, levelFor, readersOf, compareRecaps, matches, stripTags, esc, KINDS, parseRecap, recapName, ownershipFor, slug, splitDetails, shiftHeadings, freshnessOf, freshFor, editOwnership, partyEdits, comparePinned, moveId };
