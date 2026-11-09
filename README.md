@@ -1,6 +1,6 @@
 # Bayard's Campaign Journal
 
-A journal window for the party, for Foundry VTT 14 and any game system. It keeps the party journal (session recaps and standing pages such as house rules), handouts for one player or several, and each player's private journal in one place, with search, a table of contents, notices for new things and Markdown export. Everything is an ordinary Foundry journal entry in a "Campaign Journal" folder, so nothing is lost if the module is turned off.
+A journal window for the party, for Foundry VTT 14 and any game system. It keeps the party journal (session recaps and standing pages such as house rules), handouts for one player or several, and each player's private journal in one place, with search, a table of contents, notices for new things and Markdown export. With PF2e Campaign Trackers installed, the party's quests are there too. Everything is an ordinary Foundry journal entry in a "Campaign Journal" folder, so nothing is lost if the module is turned off.
 
 ## What it looks like
 
@@ -52,7 +52,7 @@ The module finds these folders by a mark it puts on them, not by their names, so
 
 ## The window
 
-- **Tabs.** Players see **Party** and **My Journal**. The GM sees **Party**, **Handouts** and **Players** (every player's journal and the handouts only some players have).
+- **Tabs.** Players see **Party** and **My Journal**. The GM sees **Party**, **Handouts** and **Players** (every player's journal and the handouts only some players have). With PF2e Campaign Trackers, everyone also has **Quests** (see [Quests](#quests)).
 - **Who can see.** The dots beside an entry are the players who can read it, in their colors with their character's initial; **All** means every player, including players who join later, and a small pen means the party can edit it. **GM** means only GMs can.
 - **Fold** any group (Recaps, Pages, Handouts and the rest) by clicking its heading, so thirty recaps don't push the pages out of sight. Folded groups show a count and stay folded in that browser.
 - **Search** looks through titles and page text, including folded groups.
@@ -104,6 +104,16 @@ Recaps list newest session first. **"Previously on…"** shows a recap's short v
 - **Delete** removes your own entries, shared copies and party entries.
 
 If players may create journal entries (Foundry's **Create New Journal Entries** permission), all of this works with no GM logged in. Without that permission the GM's client makes the entries for them, so a GM must be logged in. Changing who can edit an existing entry always needs a GM logged in, since Foundry lets only GMs change permissions.
+
+## Quests
+
+With [PF2e Campaign Trackers](https://github.com/Sir-Bayard/pf2e-campaign-trackers) installed, a **Quests** tab lists the party's quests by status (Active, Leads, Completed, Failed), with each one's category and objectives done, New and Updated marks, and icons for party quests and the party's focus. Click one to read it in the journal, drawn by Trackers as the players see it: objectives and steps, journal, leads, rewards and the party's notes. **Open in Trackers** opens it there, to tick objectives, add notes or edit it. A lead that points to another quest goes to that quest.
+
+The GM's list also shows quests players can't see yet, marked with a crossed-out eye; the journal shows any quest as the players see it, so hidden parts and GM notes stay in Trackers.
+
+**Quest links.** Write `@Quest[id]` in any journal page, or drag a quest from the list into the page's editor, and it shows as a link that opens the quest (on the Quests tab when it's clicked in this window). Trackers provides the links; see its README.
+
+Without Trackers, or when the GM hasn't opened Trackers to players, there's no Quests tab. Nothing in this module needs Trackers.
 
 ## Privacy
 

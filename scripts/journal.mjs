@@ -590,6 +590,7 @@ function questText(api, id) {
   if (!html) return "";
   const div = document.createElement("div");
   div.innerHTML = html;
+  for (const n of div.querySelectorAll(".pct-hint, .pct-sub, .pct-k")) n.remove();
   return div.textContent.replace(/\s+/g, " ");
 }
 
@@ -771,19 +772,21 @@ class JournalApp extends foundry.applications.api.ApplicationV2 {
     const all = readable();
     const groups = this.groups(all).filter(([, list, empty]) => list.length || empty);
     const shown = groups.flatMap(([, list]) => list);
-    if (!shown.some((d) => d.id === this.view.entry)) this.view.entry = shown[0]?.id ?? null;
+    const qtab = this.view.tab === "quests";
+    // On the Quests tab the Party (or other) entry being read is kept for coming back.
+    if (!qtab && !shown.some((d) => d.id === this.view.entry)) this.view.entry = shown[0]?.id ?? null;
     saveView(this.view);
     this.texts = new Map(shown.map((d) => [d.id, textOf(d.entry)]));
     const current = shown.find((d) => d.id === this.view.entry) ?? null;
     if (current && !this.isGM) markSeen(current.entry);
-    const qtab = this.view.tab === "quests";
     const qapi = qtab ? questApi() : null;
     const quests = qtab ? questList() : [];
-    if (qtab) {
-      if (!quests.some((q) => q.id === this.view.quest)) this.view.quest = (quests.find((q) => q.status === "active" && q.revealed) ?? quests.find((q) => q.revealed) ?? quests[0])?.id ?? null;
+    if (qtab && !quests.some((q) => q.id === this.view.quest)) {
+      this.view.quest = (quests.find((q) => q.status === "active" && q.revealed) ?? quests.find((q) => q.revealed) ?? quests[0])?.id ?? null;
       saveView(this.view);
-      for (const q of quests) this.texts.set(`quest:${q.id}`, questText(qapi, q.id));
     }
+    // Whether this tab rail shows the Quests dot: a change of Trackers redraws the window only when it changes (M2).
+    this.questDot = !this.isGM && (qtab ? quests : questList()).some((q) => q.mark && q.id !== this.view.quest);
     const quest = qtab ? quests.find((q) => q.id === this.view.quest) ?? null : null;
     if (quest && !this.isGM && quest.mark) qapi.markQuestSeen(quest.id);
 
@@ -841,14 +844,15 @@ class JournalApp extends foundry.applications.api.ApplicationV2 {
   /** A quest in the reading pane, drawn by Trackers as the players see it. */
   #questPage(q, api) {
     if (!q) return `<article class="bcj-page bcj-blank"><p class="bcj-hint">${this.isGM ? "Quests made in Campaign Trackers show here as the players see them." : "No quests yet."}</p></article>`;
-    const meta = [q.statusLabel, q.category, q.total ? `${q.done} of ${q.total} objectives` : ""].filter(Boolean).join(" · ");
+    const done = q.shownDone ?? q.done, total = q.shownTotal ?? q.total;
+    const meta = [q.statusLabel, q.category, total ? `${done} of ${total} objectives` : ""].filter(Boolean).join(" · ");
     const body = q.revealed ? api?.questHTML(q.id) : null;
     const note = this.isGM
       ? `<p class="bcj-hint">${q.revealed ? "As the players see it. Open it in Trackers for hidden parts, GM notes and editing." : "Players can't see this quest yet. Open it in Trackers to write it or reveal it."}</p>`
       : "";
     return `<article class="bcj-page bcj-quest" data-quest="${esc(q.id)}">
       <header class="bcj-ph"><div><h1>${esc(q.name)}</h1><div class="bcj-meta">${esc(meta)}</div></div></header>
-      <div class="bcj-tools"><button type="button" data-action="bcjQuestOpen" data-tooltip="${this.isGM ? "Open it in Campaign Trackers" : "Open it in Campaign Trackers to tick objectives and add notes"}"><i class="fa-solid fa-scroll"></i> Open in Trackers</button></div>
+      <div class="bcj-tools"><button type="button" data-action="bcjQuestOpen" data-tooltip="Open it in Campaign Trackers"><i class="fa-solid fa-scroll"></i> Open in Trackers</button></div>
       ${note}<div class="bcj-text bcj-qtext">${body ?? (this.isGM ? "" : `<p class="bcj-hint">This quest isn't open to you.</p>`)}</div>
     </article>`;
   }
@@ -899,7 +903,8 @@ class JournalApp extends foundry.applications.api.ApplicationV2 {
   _replaceHTML(result, content) {
     const scroll = content.querySelector(".bcj-read")?.scrollTop ?? 0;
     const listScroll = content.querySelector(".bcj-scroll")?.scrollTop ?? 0;
-    const sameEntry = content.querySelector(".bcj-page")?.dataset.entry === this.view.entry;
+    const page = content.querySelector(".bcj-page");
+    const sameEntry = this.view.tab === "quests" ? !!page?.dataset.quest && page.dataset.quest === this.view.quest : page?.dataset.entry === this.view.entry;
     // Someone typing in the search box keeps their place when a change elsewhere redraws the window.
     const typing = document.activeElement?.name === "bcj-q" && content.contains(document.activeElement) ? document.activeElement : null;
     const caret = typing ? [typing.selectionStart, typing.selectionEnd] : null;
@@ -995,10 +1000,7 @@ class JournalApp extends foundry.applications.api.ApplicationV2 {
   #questEvents() {
     if (this.view.tab !== "quests") return;
     for (const a of this.element.querySelectorAll(".bcj-qitem")) {
-      a.addEventListener("dragstart", (ev) => {
-        const name = a.querySelector(".bcj-it")?.textContent.trim().replace(/[{}]/g, "") ?? "";
-        ev.dataTransfer.setData("text/plain", `@Quest[${a.dataset.quest}]{${name}}`);
-      });
+      a.addEventListener("dragstart", (ev) => ev.dataTransfer.setData("text/plain", `@Quest[${a.dataset.quest}]`));
     }
     this.element.querySelector(".bcj-qtext")?.addEventListener("click", async (ev) => {
       const go = ev.target.closest("[data-pct-action]");
@@ -1009,7 +1011,8 @@ class JournalApp extends foundry.applications.api.ApplicationV2 {
         this.render();
       } else if (go.dataset.pctAction === "pctOpenActor" && go.dataset.uuid) {
         const actor = await fromUuid(go.dataset.uuid);
-        if (actor?.testUserPermission(game.user, "OBSERVER")) actor.sheet.render(true);
+        if (!actor) ui.notifications.info("That's no longer in the world.");
+        else if (actor.testUserPermission(game.user, "LIMITED")) actor.sheet.render(true);
         else ui.notifications.info("You can't open that yet.");
       }
     });
@@ -1068,7 +1071,10 @@ class JournalApp extends foundry.applications.api.ApplicationV2 {
     for (const g of el.querySelectorAll(".bcj-group")) {
       let shown = 0;
       for (const a of g.querySelectorAll(".bcj-item")) {
-        const ok = matches(q, a.querySelector(".bcj-it")?.textContent, this.texts.get(a.dataset.entry));
+        const key = a.dataset.entry;
+        // A quest's words are read from Trackers the first time someone searches.
+        if (q && key?.startsWith("quest:") && !this.texts.has(key)) this.texts.set(key, questText(questApi(), key.slice(6)));
+        const ok = matches(q, a.querySelector(".bcj-it")?.textContent, this.texts.get(key));
         a.hidden = !ok;
         if (ok) shown++;
       }
@@ -1821,7 +1827,13 @@ for (const hook of ["createJournalEntryPage", "updateJournalEntryPage", "deleteJ
 for (const hook of ["createFolder", "updateFolder", "deleteFolder"]) Hooks.on(hook, (folder) => folder.type === "JournalEntry" && refresh());
 Hooks.on("createJournalEntry", (entry) => noticeNew(entry));
 // Trackers' quests changed (or this user's New/Updated marks): redraw, for the Quests tab and its dot.
-Hooks.on(`${TRACKERS}.changed`, () => refresh());
+Hooks.on(`${TRACKERS}.changed`, () => {
+  for (const app of openApps) {
+    if (!app.rendered) continue;
+    if (app.view.tab === "quests") app.render();
+    else if (!game.user.isGM && questList().some((q) => q.mark) !== !!app.questDot) app.render();
+  }
+});
 // A quest link clicked in this window opens the quest on the Quests tab instead of in Trackers.
 Hooks.on(`${TRACKERS}.questLink`, (id, link) => {
   const app = [...openApps].find((a) => a.rendered && a.element?.contains(link));
