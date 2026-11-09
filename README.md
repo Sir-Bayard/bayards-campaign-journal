@@ -14,7 +14,7 @@ https://github.com/Sir-Bayard/bayards-campaign-journal/releases/latest/download/
 
 ## How it works
 
-- Open it from the **Campaign Journal** button at the top of the Journal tab, or with **Alt+J**.
+- Open it from the **Campaign Journal** button at the top of the Journal tab, or with **J**.
 - The GM's first login makes a **Campaign Journal** folder with **Party**, **Handouts** and **Players** inside, and a folder for each player under Players (players who join later get one too).
 - Entries in **Party** make up the party journal. Entries in **Handouts** are handouts: who has one is simply who can see it. Entries in a player's folder are that player's journal.
 - Players see only what they're allowed to see: the party journal, their own journal, and the handouts given to them.

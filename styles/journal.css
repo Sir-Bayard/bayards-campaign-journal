@@ -39,6 +39,7 @@
 .bcj .bcj-dot { display: inline-grid; place-items: center; width: 18px; height: 18px; border-radius: 50%; font-size: 10px; font-weight: 700; color: #111; background: var(--c); box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.25); }
 .bcj .bcj-all { display: inline-block; font-size: 10px; padding: 0 6px; border-radius: 9px; line-height: 18px; border: 1px solid rgba(255, 255, 255, 0.3); }
 .bcj .bcj-page .bcj-all { border-color: rgba(42, 36, 28, 0.4); }
+.bcj .bcj-all i { font-size: 8px; margin-left: 2px; }
 .bcj .bcj-k { font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase; opacity: 0.7; margin-right: 4px; }
 
 /* The page */
@@ -130,3 +131,6 @@
 .bcj .bcj-tab { position: relative; }
 .bcj .bcj-dotnew { margin-left: auto; width: 7px; height: 7px; border-radius: 50%; background: var(--bcj-gold); }
 .bcj .bcj-shared { margin: -6px 0 10px; font-family: "Signika", sans-serif; font-size: 12px; opacity: 0.75; }
+
+/* The journal's folder, kept out of players' Journal tab */
+#sidebar .bcj-hidden, .bcj-hidden { display: none !important; }

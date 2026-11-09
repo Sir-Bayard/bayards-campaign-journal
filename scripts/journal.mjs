@@ -150,6 +150,23 @@ function freshnessOf(seen, stamp) {
   return (Number(stamp) || 0) > Number(seen) ? "updated" : "";
 }
 
+/** Freshness for one player: nothing for their own latest change, and their own party entry is never "new". */
+function freshFor({ seen, stamp, lastBy, me, author }) {
+  if (lastBy && lastBy === me) return "";
+  if (author && author === me && (seen === undefined || seen === null)) return "";
+  return freshnessOf(seen, stamp);
+}
+
+/** Ownership for a party entry the party can, or can't, edit; its author always keeps Owner. */
+function editOwnership(on, authorId = null) {
+  const out = { default: on ? LEVEL.OWNER : LEVEL.OBSERVER };
+  if (authorId) out[authorId] = LEVEL.OWNER;
+  return out;
+}
+
+/** Whether every player can edit an entry (default ownership Owner). */
+const partyEdits = (ownership) => (ownership?.default ?? LEVEL.NONE) >= LEVEL.OWNER;
+
 /** A file name from an entry name. */
 const slug = (name) => String(name ?? "entry").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "entry";
 
@@ -211,7 +228,7 @@ function describe(entry) {
   const kind = kindFor(where.area, f.kind);
   const { readers: found, all } = readersOf(entry.ownership, game.users.contents);
   const readers = found.sort((a, b) => who(a).name.localeCompare(who(b).name));
-  return { entry, id: entry.id, name: entry.name, kind, area: where.area, user: where.user, pinned: !!f.pinned, sharedBy: f.sharedBy ?? null, sharedFrom: f.sharedFrom ?? null, subtitle: f.subtitle ?? "", session: f.session ?? null, date: f.date ?? null, played: f.played ?? null, attended: Array.isArray(f.attended) ? f.attended : [], readers, all, sort: entry.sort ?? 0 };
+  return { entry, id: entry.id, name: entry.name, kind, area: where.area, user: where.user, pinned: !!f.pinned, sharedBy: f.sharedBy ?? null, sharedFrom: f.sharedFrom ?? null, author: f.author ?? f.sharedBy ?? null, editable: partyEdits(entry.ownership), subtitle: f.subtitle ?? "", session: f.session ?? null, date: f.date ?? null, played: f.played ?? null, attended: Array.isArray(f.attended) ? f.attended : [], readers, all, sort: entry.sort ?? 0 };
 }
 
 /** Every journal entry this user can read. */
@@ -240,6 +257,7 @@ function who(user) {
 }
 
 function dots(d) {
+  if (d.all && d.editable) return `<span class="bcj-all" data-tooltip="All players can see and edit this">All <i class="fa-solid fa-pen"></i></span>`;
   if (d.all) return `<span class="bcj-all" data-tooltip="All players can see this">All</span>`;
   if (!d.readers.length) return `<span class="bcj-all bcj-gmonly" data-tooltip="Only GMs can see this">GM</span>`;
   return d.readers.map((u) => {
@@ -328,6 +346,7 @@ function subline(d) {
     return u?.id === game.user.id ? "Private" : `${who(u).name}'s journal`;
   }
   if (d.sharedBy) return `Shared by ${who(game.users.get(d.sharedBy)).name}`;
+  if (d.author) return `By ${who(game.users.get(d.author)).name}`;
   return d.pinned ? "Pinned" : "Page";
 }
 
@@ -346,8 +365,8 @@ function metaline(d) {
     const u = game.users.get(d.user);
     return `${who(u).name}'s journal · private`;
   }
-  if (d.sharedBy) return `Shared by ${who(game.users.get(d.sharedBy)).name}`;
-  return d.pinned ? "Pinned page" : "Party page";
+  const by = d.sharedBy ? `Shared by ${who(game.users.get(d.sharedBy)).name}` : d.author ? `Written by ${who(game.users.get(d.author)).name}` : d.pinned ? "Pinned page" : "Party page";
+  return d.editable ? `${by} · the party can edit it` : by;
 }
 
 const SEEN_KEY = `${MOD}.seen`;
@@ -375,10 +394,16 @@ function saveSeen(map) {
 function stampOf(entry) {
   return Math.max(entry._stats?.modifiedTime ?? 0, entry._stats?.createdTime ?? 0, ...entry.pages.contents.map((p) => p._stats?.modifiedTime ?? 0));
 }
-/** Whether something is new to this player: never for a GM, their own journal or a copy they shared. */
+/** Who made an entry's latest change: the entry or whichever page changed last. */
+function lastBy(entry) {
+  let best = entry._stats;
+  for (const p of entry.pages.contents) if ((p._stats?.modifiedTime ?? 0) > (best?.modifiedTime ?? 0)) best = p._stats;
+  return best?.lastModifiedBy ?? null;
+}
+/** Whether something is new to this player: never for a GM or their own journal; not for their own changes. */
 function freshness(d) {
-  if (game.user.isGM || d.sharedBy === game.user.id || (d.area === "player" && d.user === game.user.id)) return "";
-  return freshnessOf((seenMap() ?? {})[d.id], stampOf(d.entry));
+  if (game.user.isGM || (d.area === "player" && d.user === game.user.id)) return "";
+  return freshFor({ seen: (seenMap() ?? {})[d.id], stamp: stampOf(d.entry), lastBy: lastBy(d.entry), me: game.user.id, author: d.author });
 }
 function markSeen(entry) {
   const map = { ...(seenMap() ?? {}) };
@@ -402,7 +427,7 @@ function noticeNew(entry) {
   const d = describe(entry);
   if (!d || freshness(d) !== "new") return;
   noticed.add(entry.id);
-  const what = d.kind === "recap" ? "New recap" : d.kind === "handout" ? "A handout for you" : d.sharedBy ? `Shared by ${who(game.users.get(d.sharedBy)).name}` : "New in the party journal";
+  const what = d.kind === "recap" ? "New recap" : d.kind === "handout" ? "A handout for you" : d.sharedBy ? `Shared by ${who(game.users.get(d.sharedBy)).name}` : d.author ? `New from ${who(game.users.get(d.author)).name}` : "New in the party journal";
   ui.notifications.info(`Campaign Journal: ${what}: ${entry.name}`);
 }
 
@@ -485,6 +510,8 @@ class JournalApp extends foundry.applications.api.ApplicationV2 {
       bcjMarkdown: JournalApp.#onMarkdown,
       bcjExport: JournalApp.#onExport,
       bcjNewEntry: JournalApp.#onNewEntry,
+      bcjNewParty: JournalApp.#onNewParty,
+      bcjEditing: JournalApp.#onEditing,
       bcjShare: JournalApp.#onShare,
       bcjDelete: JournalApp.#onDelete,
     },
@@ -570,7 +597,7 @@ class JournalApp extends foundry.applications.api.ApplicationV2 {
       <nav class="bcj-rail">${rail}<div class="bcj-railfoot"><a data-action="bcjExport" data-tooltip="Download this tab's entries as one Markdown file"><i class="fa-solid fa-file-export"></i><span>Export</span></a>${this.isGM ? `<a data-action="bcjFolders" data-tooltip="Show the journal's folders in the Journal tab"><i class="fa-solid fa-folder-tree"></i><span>Folders</span></a>` : ""}</div></nav>
       <section class="bcj-list">
         <div class="bcj-search"><i class="fa-solid fa-magnifying-glass"></i><input type="search" name="bcj-q" placeholder="Search the journal" value="${esc(this.view.query)}"></div>
-        ${this.isGM ? `<div class="bcj-actions"><button type="button" data-action="bcjNewRecap" data-tooltip="New session recap"><i class="fa-solid fa-plus"></i> Recap</button><button type="button" data-action="bcjNewHandout" data-tooltip="New handout"><i class="fa-solid fa-plus"></i> Handout</button><button type="button" data-action="bcjNewPage" data-tooltip="New page in the party journal, such as Lines and Veils or house rules"><i class="fa-solid fa-plus"></i> Page</button></div>` : this.view.tab === "mine" ? `<div class="bcj-actions"><button type="button" data-action="bcjNewEntry"><i class="fa-solid fa-feather"></i> New entry</button></div>` : ""}
+        ${this.isGM ? `<div class="bcj-actions"><button type="button" data-action="bcjNewRecap" data-tooltip="New session recap"><i class="fa-solid fa-plus"></i> Recap</button><button type="button" data-action="bcjNewHandout" data-tooltip="New handout"><i class="fa-solid fa-plus"></i> Handout</button><button type="button" data-action="bcjNewPage" data-tooltip="New page in the party journal, such as Lines and Veils or house rules"><i class="fa-solid fa-plus"></i> Page</button></div>` : this.view.tab === "mine" ? `<div class="bcj-actions"><button type="button" data-action="bcjNewEntry"><i class="fa-solid fa-feather"></i> New entry</button></div>` : this.view.tab === "party" ? `<div class="bcj-actions"><button type="button" data-action="bcjNewParty" data-tooltip="An entry everyone can read, signed with your name"><i class="fa-solid fa-feather"></i> New party entry</button></div>` : ""}
         <div class="bcj-scroll">${noFolders ? `<p class="bcj-none">The journal's folders are being made.</p>` : listBody}<p class="bcj-none bcj-nomatch" hidden>Nothing matches.</p></div>
       </section>
       <section class="bcj-read">${current ? await this.#page(current) : this.#empty()}</section>
@@ -605,7 +632,8 @@ class JournalApp extends foundry.applications.api.ApplicationV2 {
       gm ? B("bcjShow", "fa-solid fa-eye", "Show to players", "Open it on the screens of the players who can read it") : "",
       mine ? B("bcjShare", "fa-solid fa-share-from-square", copy ? "Update the shared copy" : "Share a copy to the Party Journal", copy ? `Replace "${copy.name}" in the party journal with this version` : "Everyone will be able to read the copy; you can still edit it") : "",
       B("bcjMarkdown", "fa-solid fa-file-arrow-down", "Markdown", "Download this entry as a Markdown file"),
-      !gm && entry.isOwner && (mine || d.sharedBy === game.user.id) ? B("bcjDelete", "fa-solid fa-trash", "Delete") : "",
+      d.area === "party" && d.all && (gm || (d.author === game.user.id && entry.isOwner)) ? B("bcjEditing", d.editable ? "fa-solid fa-lock" : "fa-solid fa-user-pen", d.editable ? "Stop party editing" : "Let the party edit", d.editable ? "Only the author and the GM can edit it again" : "Every player can edit it and add to it") : "",
+      !gm && entry.isOwner && (mine || (d.area === "party" && d.author === game.user.id)) ? B("bcjDelete", "fa-solid fa-trash", "Delete") : "",
       entry.isOwner ? `<button type="button" class="bcj-edit" data-action="bcjEdit"><i class="fa-solid fa-pen"></i> Edit</button>` : "",
     ].join("");
     const sharedNote = mine && copy ? `<p class="bcj-shared"><i class="fa-solid fa-share-from-square"></i> A copy is in the party journal as "${esc(copy.name)}".</p>` : "";
@@ -757,11 +785,12 @@ class JournalApp extends foundry.applications.api.ApplicationV2 {
       position: { width: 420 },
       content: `<div class="bcj-form"><label>Title <input type="text" name="name" placeholder="House rules" autofocus></label>
         <label class="bcj-check"><input type="checkbox" name="pinned"> Pin it to the top of the party journal</label>
-        <label class="bcj-check"><input type="checkbox" name="share" checked> Players can read it now</label></div>`,
+        <label class="bcj-check"><input type="checkbox" name="share" checked> Players can read it now</label>
+        <label class="bcj-check"><input type="checkbox" name="edit"> The party can edit it too</label></div>`,
       buttons: [
         { action: "ok", label: "Make it", icon: "fa-solid fa-check", default: true, callback: (event, button) => {
           const e = button.form.elements;
-          return { name: e.name.value.trim(), pinned: e.pinned.checked, share: e.share.checked };
+          return { name: e.name.value.trim(), pinned: e.pinned.checked, share: e.share.checked || e.edit.checked, edit: e.edit.checked };
         } },
         { action: "cancel", label: "Cancel" },
       ],
@@ -769,7 +798,7 @@ class JournalApp extends foundry.applications.api.ApplicationV2 {
     });
     if (!data || typeof data !== "object" || !data.name) return;
     const entry = await JournalEntry.create({
-      name: data.name, folder: party.id, ownership: { default: data.share ? LEVEL.OBSERVER : LEVEL.NONE },
+      name: data.name, folder: party.id, ownership: data.share ? editOwnership(data.edit) : { default: LEVEL.NONE },
       flags: { [MOD]: { pinned: data.pinned } },
       pages: [{ name: data.name, type: "text", text: { content: "", format: 1 } }],
     });
@@ -860,6 +889,38 @@ class JournalApp extends foundry.applications.api.ApplicationV2 {
     askGM({ type: "create", name: name.slice(0, 120) });
   }
 
+  static async #onNewParty() {
+    if (this.isGM) return;
+    const data = await DialogV2().wait({
+      window: { title: "New party entry", icon: "fa-solid fa-feather" },
+      classes: ["bcj-dialog"],
+      position: { width: 420 },
+      content: `<div class="bcj-form"><label>Title <input type="text" name="name" placeholder="Rumors from the market" autofocus></label>
+        <label class="bcj-check"><input type="checkbox" name="edit"> Let the rest of the party edit it too</label>
+        <p class="bcj-dim">Everyone can read it, signed with your name. You can change who edits it later.</p></div>`,
+      buttons: [
+        { action: "ok", label: "Make it", icon: "fa-solid fa-check", default: true, callback: (event, button) => {
+          const e = button.form.elements;
+          return { name: e.name.value.trim(), edit: e.edit.checked };
+        } },
+        { action: "cancel", label: "Cancel" },
+      ],
+      rejectClose: false,
+    });
+    if (!data || typeof data !== "object" || !data.name) return;
+    askGM({ type: "party", name: data.name.slice(0, 120), edit: !!data.edit });
+  }
+
+  static async #onEditing() {
+    const entry = game.journal.get(this.view.entry);
+    const d = entry && describe(entry);
+    if (!d || d.area !== "party" || !d.all) return;
+    const on = !d.editable;
+    if (this.isGM) return entry.update({ ownership: editOwnership(on, d.author) });
+    if (d.author !== game.user.id || !entry.isOwner) return;
+    askGM({ type: "edit", entry: entry.id, on });
+  }
+
   static async #onShare() {
     const entry = game.journal.get(this.view.entry);
     if (!entry?.isOwner || this.isGM) return;
@@ -868,7 +929,7 @@ class JournalApp extends foundry.applications.api.ApplicationV2 {
       window: { title: copy ? "Update the shared copy" : "Share a copy" },
       classes: ["bcj-dialog"],
       content: copy
-        ? `<p>You shared this before. Replace the copy in the party journal, <strong>${esc(copy.name)}</strong>, with this version? What it says now will be overwritten.</p>`
+        ? `<p>You shared this before. Replace the copy in the party journal, <strong>${esc(copy.name)}</strong>, with this version? What it says now will be overwritten${partyEdits(copy.ownership) ? ", including anything the rest of the party added to it" : ""}.</p>`
         : `<p>Put a copy of <strong>${esc(entry.name)}</strong> in the party journal, signed with your name? Everyone will be able to read it. You can still edit the copy, and your own entry stays private.</p>`,
       rejectClose: false,
     });
@@ -1090,6 +1151,18 @@ async function onRequest(msg, sender) {
       if (!folder) return reply({ type: "fail", text: "Campaign Journal: your journal folder isn't there yet. Ask the GM." });
       const entry = await JournalEntry.create({ name, folder: folder.id, ownership: { default: LEVEL.NONE, [sender.id]: LEVEL.OWNER }, pages: [{ name, type: "text", text: { content: "", format: 1 } }] });
       if (entry) reply({ type: "done", what: "create", entry: entry.id });
+    } else if (msg.type === "party") {
+      const party = findFolder("party");
+      if (!party) return reply({ type: "fail", text: "Campaign Journal: the party journal isn't there yet. Ask the GM." });
+      const name = String(msg.name ?? "").trim().slice(0, 120) || "Untitled";
+      const entry = await JournalEntry.create({ name, folder: party.id, ownership: editOwnership(!!msg.edit, sender.id), flags: { [MOD]: { author: sender.id } }, pages: [{ name, type: "text", text: { content: "", format: 1 } }] });
+      if (entry) reply({ type: "done", what: "create", entry: entry.id });
+    } else if (msg.type === "edit") {
+      const entry = game.journal.get(msg.entry);
+      const d = entry && describe(entry);
+      if (!d || d.area !== "party" || !d.all || d.author !== sender.id || !entry.testUserPermission(sender, "OWNER")) return reply({ type: "fail", text: "Campaign Journal: only the player who wrote it, or the GM, can change who edits it." });
+      await entry.update({ ownership: editOwnership(!!msg.on, sender.id) });
+      reply({ type: "done", what: "edit", entry: entry.id, on: !!msg.on });
     } else if (msg.type === "share") {
       const source = game.journal.get(msg.entry);
       const d = source && describe(source);
@@ -1124,7 +1197,7 @@ function onSocket(msg, senderId) {
   if (!msg?.type) return;
   const sender = game.users.get(senderId);
   if (game.user.isGM) {
-    if (isPrimaryGM() && sender && !sender.isGM && ["create", "share"].includes(msg.type)) onRequest(msg, sender);
+    if (isPrimaryGM() && sender && !sender.isGM && ["create", "party", "edit", "share"].includes(msg.type)) onRequest(msg, sender);
     return;
   }
   if (!sender?.isGM) return;
@@ -1138,8 +1211,11 @@ function onSocket(msg, senderId) {
     else if (msg.type === "done" && msg.what === "create") {
       JournalApp.open(entry.id);
       entry.pages.contents[0]?.sheet.render(true);
+    } else if (msg.type === "done" && msg.what === "edit") {
+      ui.notifications.info(msg.on ? `Campaign Journal: the party can edit "${entry.name}" now.` : `Campaign Journal: only you and the GM can edit "${entry.name}" now.`);
     } else if (msg.type === "done" && msg.what === "share") {
       noticed.add(entry.id);
+      markSeen(entry);
       ui.notifications.info(`Campaign Journal: "${entry.name}" is in the party journal.`);
     }
     return true;
@@ -1157,7 +1233,7 @@ function registerKeys() {
     game.keybindings.register(MOD, "open", {
       name: "Open the Campaign Journal",
       hint: "Opens the journal window, or brings it to the front.",
-      editable: [{ key: "KeyJ", modifiers: ["Alt"] }],
+      editable: [{ key: "KeyJ", modifiers: [] }],
       onDown: () => {
         JournalApp.open();
         return true;
@@ -1174,7 +1250,8 @@ function addDirectoryButton(app, html) {
   if (!root) return;
   if (!game.user.isGM && !game.settings.get(MOD, "showFolder")) {
     const folder = findFolder("root");
-    if (folder) for (const li of root.querySelectorAll(`[data-folder-id="${folder.id}"]`)) (li.closest("li") ?? li).style.display = "none";
+    // A class, not an inline style: Foundry's search filter sets each row's display when the directory redraws.
+    if (folder) for (const li of root.querySelectorAll(`[data-folder-id="${folder.id}"]`)) (li.closest("li") ?? li).classList.add("bcj-hidden");
   }
   if (root.querySelector(".bcj-open")) return;
   const bar = root.querySelector(".header-actions") ?? root.querySelector(".directory-header");
@@ -1214,6 +1291,9 @@ Hooks.once("init", () => {
 });
 Hooks.once("ready", start);
 Hooks.on("renderJournalDirectory", addDirectoryButton);
+// A calendar module may set the calendar up after ready; draw dates again once it has.
+Hooks.on("calendaria.ready", () => refresh());
+Hooks.on("calendaria.calendarSwitched", () => refresh());
 for (const hook of ["createJournalEntry", "updateJournalEntry", "deleteJournalEntry", "createJournalEntryPage", "updateJournalEntryPage", "deleteJournalEntryPage", "createFolder", "updateFolder", "deleteFolder"]) Hooks.on(hook, refresh);
 Hooks.on("createJournalEntry", (entry) => noticeNew(entry));
 Hooks.on("updateJournalEntry", (entry, change) => {
@@ -1243,4 +1323,4 @@ if (globalThis.game?.ready) {
   start();
 }
 
-export { kindFor, levelFor, readersOf, compareRecaps, matches, stripTags, esc, KINDS, parseRecap, recapName, ownershipFor, slug, splitDetails, shiftHeadings, freshnessOf };
+export { kindFor, levelFor, readersOf, compareRecaps, matches, stripTags, esc, KINDS, parseRecap, recapName, ownershipFor, slug, splitDetails, shiftHeadings, freshnessOf, freshFor, editOwnership, partyEdits };
