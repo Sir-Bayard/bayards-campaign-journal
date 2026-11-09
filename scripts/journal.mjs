@@ -583,6 +583,19 @@ function saveView(v) {
 }
 
 const SIZE_KEY = `${MOD}.size`;
+/** Wait for an element's own transitions to end; a hidden tab pauses them, so after a second they're finished by hand. */
+async function settle(el) {
+  const anims = el.getAnimations?.() ?? [];
+  if (!anims.length) return;
+  await Promise.race([Promise.all(anims.map((a) => a.finished.catch(() => null))), new Promise((r) => setTimeout(r, 1200))]);
+  for (const a of el.getAnimations?.() ?? []) {
+    try {
+      a.finish();
+    } catch {
+      /* an animation that can't finish (infinite) is left alone */
+    }
+  }
+}
 /** The window's last size and place in this browser, kept inside the screen. */
 function loadSize() {
   let v;
@@ -836,11 +849,23 @@ class JournalApp extends foundry.applications.api.ApplicationV2 {
     const was = this.#beforeMin;
     this.#restoring = true;
     try {
-      await super.maximize();
+      const pending = super.maximize();
+      // Foundry's restore animation can stall at the header's height (seen on 14.370, core windows too), and it sets
+      // the size while that runs, so the window came back as a strip. Finish the animation at once; then let anything
+      // left end before putting the size back.
+      for (const a of this.element.getAnimations?.() ?? []) {
+        try {
+          a.finish();
+        } catch {
+          /* nothing to finish */
+        }
+      }
+      await pending;
+      await settle(this.element);
+      if (was) this.setPosition(was);
     } finally {
       this.#restoring = false;
     }
-    if (was) this.setPosition(was);
   }
 
   /** Remember the size and place the user gives the window (not while it's minimized or being restored). */
