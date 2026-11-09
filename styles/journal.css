@@ -123,3 +123,10 @@
 .bcj-dialog .bcj-file { flex-direction: row !important; align-items: center; gap: 6px; cursor: pointer; white-space: nowrap; flex: 2 !important; }
 .bcj-dialog .bcj-file input[type="file"] { font-size: 11px; }
 .bcj-dialog .bcj-dim { opacity: 0.65; font-size: 11px; }
+
+/* New and updated */
+.bcj .bcj-new { font-size: 9px; letter-spacing: 0.06em; text-transform: uppercase; padding: 0 4px; margin-right: 5px; border-radius: 3px; background: var(--bcj-gold); color: #1b1408; font-weight: 700; }
+.bcj .bcj-new.bcj-updated { background: rgba(201, 164, 92, 0.35); color: #f1e6cc; }
+.bcj .bcj-tab { position: relative; }
+.bcj .bcj-dotnew { margin-left: auto; width: 7px; height: 7px; border-radius: 50%; background: var(--bcj-gold); }
+.bcj .bcj-shared { margin: -6px 0 10px; font-family: "Signika", sans-serif; font-size: 12px; opacity: 0.75; }

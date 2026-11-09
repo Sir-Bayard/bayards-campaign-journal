@@ -144,6 +144,12 @@ function shiftHeadings(md, by) {
   }).join("\n");
 }
 
+/** Whether a player has seen an entry as it is: "new" (never opened), "updated" (changed since) or "". */
+function freshnessOf(seen, stamp) {
+  if (seen === undefined || seen === null) return "new";
+  return (Number(stamp) || 0) > Number(seen) ? "updated" : "";
+}
+
 /** A file name from an entry name. */
 const slug = (name) => String(name ?? "entry").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "entry";
 
@@ -204,7 +210,7 @@ function describe(entry) {
   const f = flagsOf(entry);
   const kind = kindFor(where.area, f.kind);
   const { readers, all } = readersOf(entry.ownership, game.users.contents);
-  return { entry, id: entry.id, name: entry.name, kind, area: where.area, user: where.user, pinned: !!f.pinned, subtitle: f.subtitle ?? "", session: f.session ?? null, date: f.date ?? null, played: f.played ?? null, attended: Array.isArray(f.attended) ? f.attended : [], readers, all, sort: entry.sort ?? 0 };
+  return { entry, id: entry.id, name: entry.name, kind, area: where.area, user: where.user, pinned: !!f.pinned, sharedBy: f.sharedBy ?? null, sharedFrom: f.sharedFrom ?? null, subtitle: f.subtitle ?? "", session: f.session ?? null, date: f.date ?? null, played: f.played ?? null, attended: Array.isArray(f.attended) ? f.attended : [], readers, all, sort: entry.sort ?? 0 };
 }
 
 /** Every journal entry this user can read. */
@@ -314,6 +320,7 @@ function subline(d) {
     const u = game.users.get(d.user);
     return u?.id === game.user.id ? "Private" : `${who(u).name}'s journal`;
   }
+  if (d.sharedBy) return `Shared by ${who(game.users.get(d.sharedBy)).name}`;
   return d.pinned ? "Pinned" : "Page";
 }
 
@@ -332,7 +339,64 @@ function metaline(d) {
     const u = game.users.get(d.user);
     return `${who(u).name}'s journal · private`;
   }
+  if (d.sharedBy) return `Shared by ${who(game.users.get(d.sharedBy)).name}`;
   return d.pinned ? "Pinned page" : "Party page";
+}
+
+const SEEN_KEY = `${MOD}.seen`;
+let seenCache;
+/** This player's map of entry id to the change time they last saw, or null before the first load. */
+function seenMap() {
+  if (seenCache === undefined) {
+    try {
+      seenCache = JSON.parse(localStorage.getItem(SEEN_KEY));
+    } catch {
+      seenCache = null;
+    }
+  }
+  return seenCache;
+}
+function saveSeen(map) {
+  seenCache = map;
+  try {
+    localStorage.setItem(SEEN_KEY, JSON.stringify(map));
+  } catch {
+    /* no storage: markers last until the page reloads */
+  }
+}
+/** When an entry or any of its pages last changed (the server's clock). */
+function stampOf(entry) {
+  return Math.max(entry._stats?.modifiedTime ?? 0, entry._stats?.createdTime ?? 0, ...entry.pages.contents.map((p) => p._stats?.modifiedTime ?? 0));
+}
+/** Whether something is new to this player: never for a GM, their own journal or a copy they shared. */
+function freshness(d) {
+  if (game.user.isGM || d.sharedBy === game.user.id || (d.area === "player" && d.user === game.user.id)) return "";
+  return freshnessOf((seenMap() ?? {})[d.id], stampOf(d.entry));
+}
+function markSeen(entry) {
+  const map = { ...(seenMap() ?? {}) };
+  const stamp = stampOf(entry);
+  if (map[entry.id] === stamp) return;
+  map[entry.id] = stamp;
+  saveSeen(map);
+}
+/** On a player's first load, everything already there counts as seen, so the list doesn't open full of markers. */
+function seedSeen() {
+  if (game.user.isGM || seenMap()) return;
+  const map = {};
+  for (const d of readable()) map[d.id] = stampOf(d.entry);
+  saveSeen(map);
+}
+
+/** A short notice when something new reaches this player: a recap, a handout, a page or a shared entry. */
+const noticed = new Set();
+function noticeNew(entry) {
+  if (game.user.isGM || noticed.has(entry.id) || !entry.testUserPermission(game.user, "OBSERVER")) return;
+  const d = describe(entry);
+  if (!d || freshness(d) !== "new") return;
+  noticed.add(entry.id);
+  const what = d.kind === "recap" ? "New recap" : d.kind === "handout" ? "A handout for you" : d.sharedBy ? `Shared by ${who(game.users.get(d.sharedBy)).name}` : "New in the party journal";
+  ui.notifications.info(`Campaign Journal: ${what}: ${entry.name}`);
 }
 
 /** The readable pages of an entry, as HTML. */
@@ -412,6 +476,9 @@ class JournalApp extends foundry.applications.api.ApplicationV2 {
       bcjPrevious: JournalApp.#onPrevious,
       bcjMarkdown: JournalApp.#onMarkdown,
       bcjExport: JournalApp.#onExport,
+      bcjNewEntry: JournalApp.#onNewEntry,
+      bcjShare: JournalApp.#onShare,
+      bcjDelete: JournalApp.#onDelete,
     },
   };
 
@@ -433,9 +500,8 @@ class JournalApp extends foundry.applications.api.ApplicationV2 {
       : [["party", "Party", "fa-solid fa-users"], ["mine", "My Journal", "fa-solid fa-feather"]];
   }
 
-  /** The current tab's groups: [heading, entries, empty text]. */
-  groups(all) {
-    const tab = this.view.tab;
+  /** A tab's groups (the current tab unless named): [heading, entries, empty text]. */
+  groups(all, tab = this.view.tab) {
     if (tab === "party") {
       const party = all.filter((d) => d.area === "party");
       return [
@@ -477,10 +543,16 @@ class JournalApp extends foundry.applications.api.ApplicationV2 {
     saveView(this.view);
     this.texts = new Map(shown.map((d) => [d.id, textOf(d.entry)]));
     const current = shown.find((d) => d.id === this.view.entry) ?? null;
+    if (current && !this.isGM) markSeen(current.entry);
 
-    const rail = tabs.map(([k, label, icon]) => `<a class="bcj-tab ${k === this.view.tab ? "active" : ""}" data-action="bcjTab" data-tab="${k}"><i class="${icon}"></i><span>${label}</span></a>`).join("");
+    const mark = (d) => {
+      const f = freshness(d);
+      return f ? `<b class="bcj-new bcj-${f}">${f === "new" ? "New" : "Updated"}</b>` : "";
+    };
+    const unseenIn = (k) => !this.isGM && this.groups(all, k).some(([, items]) => items.some((d) => freshness(d)));
+    const rail = tabs.map(([k, label, icon]) => `<a class="bcj-tab ${k === this.view.tab ? "active" : ""}" data-action="bcjTab" data-tab="${k}"><i class="${icon}"></i><span>${label}</span>${unseenIn(k) ? `<i class="bcj-dotnew" data-tooltip="Something new"></i>` : ""}</a>`).join("");
     const list = groups.map(([heading, items, empty]) => `<div class="bcj-group"><div class="bcj-gh">${esc(heading)}</div>${items.length ? items.map((d) => `<a class="bcj-item ${d.id === this.view.entry ? "active" : ""}" data-action="bcjEntry" data-entry="${esc(d.id)}">
-        <span class="bcj-it">${esc(d.name)}</span><span class="bcj-is">${esc(subline(d))}</span><span class="bcj-iw">${dots(d)}</span></a>`).join("") : `<p class="bcj-none">${esc(empty)}</p>`}</div>`).join("");
+        <span class="bcj-it">${esc(d.name)}</span><span class="bcj-is">${mark(d)}${esc(subline(d))}</span><span class="bcj-iw">${dots(d)}</span></a>`).join("") : `<p class="bcj-none">${esc(empty)}</p>`}</div>`).join("");
     const noFolders = this.isGM && !findFolder("root");
     const listBody = shown.length || groups.length ? list : "";
 
@@ -488,7 +560,7 @@ class JournalApp extends foundry.applications.api.ApplicationV2 {
       <nav class="bcj-rail">${rail}<div class="bcj-railfoot"><a data-action="bcjExport" data-tooltip="Download this tab's entries as one Markdown file"><i class="fa-solid fa-file-export"></i><span>Export</span></a>${this.isGM ? `<a data-action="bcjFolders" data-tooltip="Show the journal's folders in the Journal tab"><i class="fa-solid fa-folder-tree"></i><span>Folders</span></a>` : ""}</div></nav>
       <section class="bcj-list">
         <div class="bcj-search"><i class="fa-solid fa-magnifying-glass"></i><input type="search" name="bcj-q" placeholder="Search the journal" value="${esc(this.view.query)}"></div>
-        ${this.isGM ? `<div class="bcj-actions"><button type="button" data-action="bcjNewRecap"><i class="fa-solid fa-plus"></i> New recap</button><button type="button" data-action="bcjNewHandout"><i class="fa-solid fa-envelope-open-text"></i> New handout</button></div>` : ""}
+        ${this.isGM ? `<div class="bcj-actions"><button type="button" data-action="bcjNewRecap"><i class="fa-solid fa-plus"></i> New recap</button><button type="button" data-action="bcjNewHandout"><i class="fa-solid fa-envelope-open-text"></i> New handout</button></div>` : this.view.tab === "mine" ? `<div class="bcj-actions"><button type="button" data-action="bcjNewEntry"><i class="fa-solid fa-feather"></i> New entry</button></div>` : ""}
         <div class="bcj-scroll">${noFolders ? `<p class="bcj-none">The journal's folders are being made.</p>` : listBody}<p class="bcj-none bcj-nomatch" hidden>Nothing matches.</p></div>
       </section>
       <section class="bcj-read">${current ? await this.#page(current) : this.#empty()}</section>
@@ -513,20 +585,25 @@ class JournalApp extends foundry.applications.api.ApplicationV2 {
       : "";
     const B = (action, icon, label, tip = "") => `<button type="button" data-action="${action}"${tip ? ` data-tooltip="${esc(tip)}"` : ""}><i class="${icon}"></i> ${label}</button>`;
     const gm = this.isGM;
+    const mine = !gm && d.area === "player" && d.user === game.user.id && entry.isOwner;
+    const copy = mine ? sharedCopyOf(entry.id, game.user.id) : null;
     const tools = [
       gm && d.kind === "recap" ? B("bcjPrevious", "fa-solid fa-clock-rotate-left", "Previously on…", "Show the short version on every player's screen") : "",
       gm && d.kind === "recap" ? B("bcjDetails", "fa-solid fa-sliders", "Details", "Session, dates and who was at the table") : "",
       gm && d.kind === "handout" ? B("bcjGive", "fa-solid fa-user-plus", "Give to…") : "",
       gm && d.kind === "page" ? B("bcjPin", d.pinned ? "fa-solid fa-thumbtack-slash" : "fa-solid fa-thumbtack", d.pinned ? "Unpin" : "Pin", d.pinned ? "Move it back among the pages" : "Keep it at the top of the party journal") : "",
       gm ? B("bcjShow", "fa-solid fa-eye", "Show to players", "Open it on the screens of the players who can read it") : "",
+      mine ? B("bcjShare", "fa-solid fa-share-from-square", copy ? "Update the shared copy" : "Share a copy to the Party Journal", copy ? `Replace "${copy.name}" in the party journal with this version` : "Everyone will be able to read the copy; you can still edit it") : "",
       B("bcjMarkdown", "fa-solid fa-file-arrow-down", "Markdown", "Download this entry as a Markdown file"),
+      !gm && entry.isOwner && (mine || d.sharedBy === game.user.id) ? B("bcjDelete", "fa-solid fa-trash", "Delete") : "",
       entry.isOwner ? `<button type="button" class="bcj-edit" data-action="bcjEdit"><i class="fa-solid fa-pen"></i> Edit</button>` : "",
     ].join("");
+    const sharedNote = mine && copy ? `<p class="bcj-shared"><i class="fa-solid fa-share-from-square"></i> A copy is in the party journal as "${esc(copy.name)}".</p>` : "";
     const text = d.kind === "handout" ? `<div class="bcj-letter">${body}</div>` : body;
     return `<article class="bcj-page bcj-kind-${d.kind}" data-entry="${esc(d.id)}">
       <header class="bcj-ph"><div><h1>${esc(d.name)}</h1><div class="bcj-meta">${esc(metaline(d))}</div>${att}</div>
         <div class="bcj-seen"><span class="bcj-k">Who can see</span>${dots(d)}</div></header>
-      ${tools ? `<div class="bcj-tools">${tools}</div>` : ""}
+      ${tools ? `<div class="bcj-tools">${tools}</div>` : ""}${sharedNote}
       <div class="bcj-flow"><nav class="bcj-toc" hidden></nav><div class="bcj-text">${text}</div></div>
     </article>`;
   }
@@ -706,8 +783,8 @@ class JournalApp extends foundry.applications.api.ApplicationV2 {
     if (!this.isGM || !entry) return;
     if (!shortOf(entry)) return ui.notifications.warn(`"${entry.name}" has no short version to show.`);
     const to = readersOf(entry.ownership, game.users.contents).readers.filter((u) => u.active);
-    if (!to.length) return ui.notifications.warn(`No player who can read "${entry.name}" is logged in.`);
-    game.socket.emit(SOCKET, { type: "previously", entry: entry.id, users: to.map((u) => u.id) });
+    if (to.length) game.socket.emit(SOCKET, { type: "previously", entry: entry.id, users: to.map((u) => u.id) });
+    else ui.notifications.info(`No player who can read "${entry.name}" is logged in, so only you see it.`);
     PreviouslyApp.show(entry);
   }
 
@@ -725,6 +802,46 @@ class JournalApp extends foundry.applications.api.ApplicationV2 {
     const label = this.tabs().find(([k]) => k === this.view.tab)?.[1] ?? "Journal";
     const md = `# Campaign Journal: ${label}\n\n${list.map((d) => entryMarkdown(d, 2)).join("\n\n---\n\n")}\n`;
     foundry.utils.saveDataToFile(md, "text/markdown", `campaign-journal-${slug(label)}.md`);
+  }
+
+  static async #onNewEntry() {
+    if (this.isGM) return;
+    const name = await DialogV2().prompt({
+      window: { title: "New journal entry", icon: "fa-solid fa-feather" },
+      classes: ["bcj-dialog"],
+      content: `<div class="bcj-form"><label>Title <input type="text" name="name" placeholder="What the guard didn't say" autofocus></label><p class="bcj-dim">Only you and the GM can read it.</p></div>`,
+      ok: { label: "Make it", icon: "fa-solid fa-check", callback: (event, button) => button.form.elements.name.value.trim() },
+      rejectClose: false,
+    });
+    if (typeof name !== "string" || !name) return;
+    askGM({ type: "create", name: name.slice(0, 120) });
+  }
+
+  static async #onShare() {
+    const entry = game.journal.get(this.view.entry);
+    if (!entry?.isOwner || this.isGM) return;
+    const copy = sharedCopyOf(entry.id, game.user.id);
+    const ok = await DialogV2().confirm({
+      window: { title: copy ? "Update the shared copy" : "Share a copy" },
+      classes: ["bcj-dialog"],
+      content: copy
+        ? `<p>You shared this before. Replace the copy in the party journal, <strong>${esc(copy.name)}</strong>, with this version? What it says now will be overwritten.</p>`
+        : `<p>Put a copy of <strong>${esc(entry.name)}</strong> in the party journal, signed with your name? Everyone will be able to read it. You can still edit the copy, and your own entry stays private.</p>`,
+      rejectClose: false,
+    });
+    if (ok) askGM({ type: "share", entry: entry.id });
+  }
+
+  static async #onDelete() {
+    const entry = game.journal.get(this.view.entry);
+    if (!entry?.isOwner || this.isGM) return;
+    const ok = await DialogV2().confirm({ window: { title: "Delete" }, classes: ["bcj-dialog"], content: `<p>Delete <strong>${esc(entry.name)}</strong>? This can't be undone.</p>`, rejectClose: false });
+    if (!ok) return;
+    try {
+      await entry.delete();
+    } catch (err) {
+      ui.notifications.warn(`Campaign Journal: couldn't delete "${entry.name}" (${err.message}).`);
+    }
   }
 
   /** Open the window, on an entry if one is given. */
@@ -900,15 +1017,92 @@ class PreviouslyApp extends foundry.applications.api.ApplicationV2 {
 }
 
 const SOCKET = `module.${MOD}`;
-/** Messages from a GM's client: open an entry, or show a recap's short version, for the players named. */
+
+/** The copy of a player's entry they shared to the party journal, if there is one. */
+function sharedCopyOf(sourceId, userId) {
+  return game.journal.find((e) => {
+    const f = flagsOf(e);
+    return f.sharedFrom === sourceId && f.sharedBy === userId && areaOf(e.folder)?.area === "party";
+  }) ?? null;
+}
+
+/** A player asks the GM's client to do something they may not have the rights for. */
+function askGM(msg) {
+  if (!game.users.activeGM) {
+    ui.notifications.warn("Campaign Journal: a GM needs to be logged in for that.");
+    return false;
+  }
+  game.socket.emit(SOCKET, msg);
+  return true;
+}
+
+/** The active GM's client acts on a player's request: a new entry in their folder, or a shared copy. */
+async function onRequest(msg, sender) {
+  const reply = (extra) => game.socket.emit(SOCKET, { users: [sender.id], ...extra });
+  try {
+    if (msg.type === "create") {
+      await ensureFolders();
+      const folder = findFolder("player", sender.id);
+      const name = String(msg.name ?? "").trim().slice(0, 120) || "Untitled";
+      if (!folder) return reply({ type: "fail", text: "Campaign Journal: your journal folder isn't there yet. Ask the GM." });
+      const entry = await JournalEntry.create({ name, folder: folder.id, ownership: { default: LEVEL.NONE, [sender.id]: LEVEL.OWNER }, pages: [{ name, type: "text", text: { content: "", format: 1 } }] });
+      if (entry) reply({ type: "done", what: "create", entry: entry.id });
+    } else if (msg.type === "share") {
+      const source = game.journal.get(msg.entry);
+      const d = source && describe(source);
+      if (!d || d.area !== "player" || d.user !== sender.id || !source.testUserPermission(sender, "OWNER")) return reply({ type: "fail", text: "Campaign Journal: only an entry in your own journal can be shared." });
+      const party = findFolder("party");
+      if (!party) return reply({ type: "fail", text: "Campaign Journal: the party journal isn't there yet. Ask the GM." });
+      const pages = source.pages.contents.sort((a, b) => a.sort - b.sort).map((page) => {
+        const data = page.toObject();
+        delete data._id;
+        data.ownership = { default: LEVEL.INHERIT };
+        return data;
+      });
+      let copy = sharedCopyOf(source.id, sender.id);
+      if (copy) {
+        await copy.update({ name: source.name });
+        await copy.deleteEmbeddedDocuments("JournalEntryPage", copy.pages.map((pg) => pg.id));
+        await copy.createEmbeddedDocuments("JournalEntryPage", pages);
+      } else {
+        copy = await JournalEntry.create({ name: source.name, folder: party.id, ownership: { default: LEVEL.OBSERVER, [sender.id]: LEVEL.OWNER }, flags: { [MOD]: { sharedFrom: source.id, sharedBy: sender.id } }, pages });
+      }
+      if (copy) reply({ type: "done", what: "share", entry: copy.id });
+    }
+  } catch (err) {
+    console.error(`${MOD} | a player's request failed`, err);
+    reply({ type: "fail", text: `Campaign Journal: that didn't work (${err.message}).` });
+  }
+}
+
+/** Socket messages. The active GM's client takes players' requests; a player's client takes a GM's messages
+ * (open an entry, show a recap's short version, the answer to a request). Foundry gives the sender's id. */
 function onSocket(msg, senderId) {
-  if (!msg?.type || game.user.isGM) return;
-  if (senderId && !game.users.get(senderId)?.isGM) return;
+  if (!msg?.type) return;
+  const sender = game.users.get(senderId);
+  if (game.user.isGM) {
+    if (isPrimaryGM() && sender && !sender.isGM && ["create", "share"].includes(msg.type)) onRequest(msg, sender);
+    return;
+  }
+  if (!sender?.isGM) return;
   if (Array.isArray(msg.users) && !msg.users.includes(game.user.id)) return;
-  const entry = game.journal.get(msg.entry);
-  if (!entry?.testUserPermission(game.user, "OBSERVER")) return;
-  if (msg.type === "show") JournalApp.open(entry.id);
-  else if (msg.type === "previously") PreviouslyApp.show(entry);
+  if (msg.type === "fail") return ui.notifications.warn(String(msg.text ?? "Campaign Journal: that didn't work."));
+  const act = () => {
+    const entry = game.journal.get(msg.entry);
+    if (!entry?.testUserPermission(game.user, "OBSERVER")) return false;
+    if (msg.type === "show") JournalApp.open(entry.id);
+    else if (msg.type === "previously") PreviouslyApp.show(entry);
+    else if (msg.type === "done" && msg.what === "create") {
+      JournalApp.open(entry.id);
+      entry.pages.contents[0]?.sheet.render(true);
+    } else if (msg.type === "done" && msg.what === "share") {
+      noticed.add(entry.id);
+      ui.notifications.info(`Campaign Journal: "${entry.name}" is in the party journal.`);
+    }
+    return true;
+  };
+  // A new entry can arrive a moment after the message about it.
+  if (!act()) setTimeout(act, 400);
 }
 
 /* ------------------------------------------------------------------ */
@@ -931,10 +1125,15 @@ function registerKeys() {
   }
 }
 
-/** A button at the top of the Journal tab. */
+/** A button at the top of the Journal tab, and the journal's folder kept out of players' view there. */
 function addDirectoryButton(app, html) {
   const root = html instanceof HTMLElement ? html : html?.[0];
-  if (!root || root.querySelector(".bcj-open")) return;
+  if (!root) return;
+  if (!game.user.isGM && !game.settings.get(MOD, "showFolder")) {
+    const folder = findFolder("root");
+    if (folder) for (const li of root.querySelectorAll(`[data-folder-id="${folder.id}"]`)) (li.closest("li") ?? li).style.display = "none";
+  }
+  if (root.querySelector(".bcj-open")) return;
   const bar = root.querySelector(".header-actions") ?? root.querySelector(".directory-header");
   if (!bar) return;
   const btn = document.createElement("button");
@@ -951,15 +1150,36 @@ function addDirectoryButton(app, html) {
 function start() {
   game.modules.get(MOD).api = { open: (entryId) => JournalApp.open(entryId), refresh };
   game.socket.on(SOCKET, onSocket);
+  seedSeen();
   ensureFolders();
   const dir = ui.journal ?? ui.sidebar?.tabs?.journal;
   if (dir?.element) addDirectoryButton(dir, dir.element);
 }
 
-Hooks.once("init", registerKeys);
+function registerSettings() {
+  game.settings.register(MOD, "showFolder", {
+    name: "Players see the journal's folder",
+    hint: "Show the Campaign Journal folder in players' Journal tab. Off keeps their tab clean: they read everything in the journal window.",
+    scope: "world", config: true, type: Boolean, default: false,
+    onChange: () => ui.journal?.render(),
+  });
+}
+
+Hooks.once("init", () => {
+  registerSettings();
+  registerKeys();
+});
 Hooks.once("ready", start);
 Hooks.on("renderJournalDirectory", addDirectoryButton);
 for (const hook of ["createJournalEntry", "updateJournalEntry", "deleteJournalEntry", "createJournalEntryPage", "updateJournalEntryPage", "deleteJournalEntryPage", "createFolder", "updateFolder", "deleteFolder"]) Hooks.on(hook, refresh);
+Hooks.on("createJournalEntry", (entry) => noticeNew(entry));
+Hooks.on("updateJournalEntry", (entry, change) => {
+  if ("ownership" in change || "folder" in change) noticeNew(entry);
+});
+// A folder that appears later (the first GM login) is hidden from players too.
+Hooks.on("createFolder", () => {
+  if (!game.user.isGM) ui.journal?.render();
+});
 Hooks.on("createUser", () => {
   ensureFolders();
   refresh();
@@ -971,8 +1191,13 @@ Hooks.on("updateUser", (user, change) => {
 
 // Loaded after ready (a test injection): run the start-up now.
 if (globalThis.game?.ready) {
+  try {
+    registerSettings();
+  } catch {
+    /* already registered */
+  }
   registerKeys();
   start();
 }
 
-export { kindFor, levelFor, readersOf, compareRecaps, matches, stripTags, esc, KINDS, parseRecap, recapName, ownershipFor, slug, splitDetails, shiftHeadings };
+export { kindFor, levelFor, readersOf, compareRecaps, matches, stripTags, esc, KINDS, parseRecap, recapName, ownershipFor, slug, splitDetails, shiftHeadings, freshnessOf };

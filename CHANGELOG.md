@@ -12,3 +12,9 @@
 - Show to players opens an entry on the screens of the players who can read it. "Previously on…" shows a recap's short version on every player's screen, with a button to read the rest.
 - Pin a party page to the top of the party journal.
 - Markdown: download an entry, or the whole tab with Export.
+- Players write their own entries (New entry, then Foundry's editor); only they and the GM can read them. A GM's client makes the entry, so players don't need the right to create journal entries.
+- Share a copy to the Party Journal: a copy signed "Shared by" the player, which everyone can read and the player can still edit. Sharing the same entry again asks first, then replaces the earlier copy in place.
+- Players can delete their own entries and their shared copies.
+- A short notice when something new reaches a player (a recap, a handout given to them, a shared entry), and New or Updated markers in their list until they open it, with a dot on the tab. Edits show as Updated without a notice.
+- The Campaign Journal folder is hidden from players' Journal tab, so they read everything in the window; a setting shows it again.
+- "Previously on…" pops up on the GM's screen too, even when no player is logged in, so you see what they see.
