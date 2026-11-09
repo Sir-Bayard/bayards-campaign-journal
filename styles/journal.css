@@ -151,3 +151,13 @@
 
 /* The journal's folder, kept out of players' Journal tab */
 #sidebar .bcj-hidden, .bcj-hidden { display: none !important; }
+
+/* The Quests tab (quests from PF2e Campaign Trackers, drawn by it). */
+.bcj .bcj-qitem .bcj-iw { display: flex; gap: 5px; align-items: center; opacity: 0.75; font-size: 11px; }
+.bcj .bcj-qitem.bcj-qhidden .bcj-it { opacity: 0.6; font-style: italic; }
+.bcj .bcj-qitem.bcj-qs-completed .bcj-it { color: #6fa46a; }
+.bcj .bcj-qitem.bcj-qs-failed .bcj-it { color: #c0675c; }
+.bcj .bcj-quest .bcj-hint { font-size: 13px; opacity: 0.75; margin: 0 0 10px; }
+.bcj .bcj-quest .bcj-qtext { font-family: inherit; font-size: 15px; line-height: 1.45; }
+.bcj .bcj-quest .bcj-qtext .pct-app.pct-embed .pct { font-size: 15px; }
+.bcj .bcj-text a.pct-quest-link { font-family: inherit; font-size: 0.9em; }

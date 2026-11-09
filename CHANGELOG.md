@@ -1,7 +1,9 @@
 # Changelog
 
-## 0.1.2
+## 0.2.0
 
+- A Quests tab, when PF2e Campaign Trackers is installed: the quests the party knows, by status (Active, Leads, Completed, Failed), with each one's category, progress, New and Updated marks, and party-quest and focus icons. Click one to read it in the journal as the players see it; Open in Trackers ticks objectives, adds notes or edits it. The GM sees quests players can't yet, marked. Without Trackers (or when players can't open it) there's no Quests tab.
+- Quest links: Trackers' `@Quest[id]` links in journal text open the quest on the Quests tab. Drag a quest from the list into a journal page to make one.
 - Restoring the window from minimized brings it back at its full size; on Foundry 14.370 it came back as a thin strip.
 - Verified on Foundry 14.370.
 

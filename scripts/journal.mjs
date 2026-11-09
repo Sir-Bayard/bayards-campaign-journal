@@ -560,6 +560,39 @@ function textOf(entry) {
 
 const openApps = new Set();
 let refreshTimer = null;
+/* Quests, from PF2e Campaign Trackers when it's installed and on (this module never needs it). */
+const TRACKERS = "pf2e-campaign-trackers";
+/** Trackers' API when it can draw quests for this user, else null. */
+function questApi() {
+  const m = game.modules.get(TRACKERS);
+  const api = m?.active ? m.api : null;
+  if (typeof api?.quests !== "function" || typeof api.questHTML !== "function") return null;
+  if (game.user.isGM) return api;
+  try {
+    return game.settings.get(TRACKERS, "playerAccess") ? api : null;
+  } catch {
+    return api;
+  }
+}
+const QUEST_GROUPS = [["active", "Active"], ["lead", "Leads"], ["completed", "Completed"], ["failed", "Failed"]];
+/** The quests this user can see, from Trackers. */
+function questList() {
+  try {
+    return questApi()?.quests() ?? [];
+  } catch (err) {
+    console.warn(`${MOD} | couldn't read quests from Campaign Trackers`, err);
+    return [];
+  }
+}
+/** The words of a quest as players see it, for search. */
+function questText(api, id) {
+  const html = api?.questHTML(id);
+  if (!html) return "";
+  const div = document.createElement("div");
+  div.innerHTML = html;
+  return div.textContent.replace(/\s+/g, " ");
+}
+
 function refresh() {
   clearTimeout(refreshTimer);
   refreshTimer = setTimeout(() => {
@@ -576,7 +609,7 @@ function loadView() {
 }
 function saveView(v) {
   try {
-    localStorage.setItem(storeKey("view"), JSON.stringify({ tab: v.tab, entry: v.entry, sorts: v.sorts, folded: v.folded }));
+    localStorage.setItem(storeKey("view"), JSON.stringify({ tab: v.tab, entry: v.entry, quest: v.quest, sorts: v.sorts, folded: v.folded }));
   } catch {
     /* no storage: the view resets on reload */
   }
@@ -661,13 +694,15 @@ class JournalApp extends foundry.applications.api.ApplicationV2 {
       bcjEditing: JournalApp.#onEditing,
       bcjShare: JournalApp.#onShare,
       bcjDelete: JournalApp.#onDelete,
+      bcjQuest: JournalApp.#onQuest,
+      bcjQuestOpen: JournalApp.#onQuestOpen,
     },
   };
 
   constructor(options = {}) {
     super(foundry.utils.mergeObject({ position: loadSize() }, options));
     const saved = loadView();
-    this.view = { tab: saved.tab ?? "party", entry: saved.entry ?? null, query: "", sorts: saved.sorts && typeof saved.sorts === "object" ? { ...saved.sorts } : {}, folded: saved.folded && typeof saved.folded === "object" ? { ...saved.folded } : {} };
+    this.view = { tab: saved.tab ?? "party", entry: saved.entry ?? null, quest: saved.quest ?? null, query: "", sorts: saved.sorts && typeof saved.sorts === "object" ? { ...saved.sorts } : {}, folded: saved.folded && typeof saved.folded === "object" ? { ...saved.folded } : {} };
     this.texts = new Map();
   }
 
@@ -677,13 +712,18 @@ class JournalApp extends foundry.applications.api.ApplicationV2 {
 
   /** The tabs this user has: Party, then My Journal for players, or Handouts and Players for GMs. */
   tabs() {
-    return this.isGM
+    const tabs = this.isGM
       ? [["party", "Party", "fa-solid fa-users"], ["handouts", "Handouts", "fa-solid fa-envelope-open-text"], ["players", "Players", "fa-solid fa-user-group"]]
       : [["party", "Party", "fa-solid fa-users"], ["mine", "My Journal", "fa-solid fa-feather"]];
+    // Quests, when PF2e Campaign Trackers is installed and players may open it.
+    if (questApi()) tabs.push(["quests", "Quests", "fa-solid fa-scroll"]);
+    return tabs;
   }
 
   /** A tab's groups (the current tab unless named): [heading, entries, empty text, the key of its sort toggle]. */
   groups(all, tab = this.view.tab) {
+    // The Quests tab lists Trackers' quests, not journal entries.
+    if (tab === "quests") return [];
     // Each kind of list has its own Newest / A-Z choice; every player's group on the Players tab shares one.
     const orderFor = (key) => (this.view.sorts[key] === "az" ? byName : byNewest);
     if (tab === "party") {
@@ -736,12 +776,22 @@ class JournalApp extends foundry.applications.api.ApplicationV2 {
     this.texts = new Map(shown.map((d) => [d.id, textOf(d.entry)]));
     const current = shown.find((d) => d.id === this.view.entry) ?? null;
     if (current && !this.isGM) markSeen(current.entry);
+    const qtab = this.view.tab === "quests";
+    const qapi = qtab ? questApi() : null;
+    const quests = qtab ? questList() : [];
+    if (qtab) {
+      if (!quests.some((q) => q.id === this.view.quest)) this.view.quest = (quests.find((q) => q.status === "active" && q.revealed) ?? quests.find((q) => q.revealed) ?? quests[0])?.id ?? null;
+      saveView(this.view);
+      for (const q of quests) this.texts.set(`quest:${q.id}`, questText(qapi, q.id));
+    }
+    const quest = qtab ? quests.find((q) => q.id === this.view.quest) ?? null : null;
+    if (quest && !this.isGM && quest.mark) qapi.markQuestSeen(quest.id);
 
     const mark = (d) => {
       const f = freshness(d);
       return f ? `<b class="bcj-new bcj-${f}">${f === "new" ? "New" : "Updated"}</b>` : "";
     };
-    const unseenIn = (k) => !this.isGM && this.groups(all, k).some(([, items]) => items.some((d) => freshness(d)));
+    const unseenIn = (k) => !this.isGM && (k === "quests" ? (qtab ? quests : questList()).some((q) => q.mark && q.id !== this.view.quest) : this.groups(all, k).some(([, items]) => items.some((d) => freshness(d))));
     const rail = tabs.map(([k, label, icon]) => `<a class="bcj-tab ${k === this.view.tab ? "active" : ""}" data-action="bcjTab" data-tab="${k}"><i class="${icon}"></i><span>${label}</span>${unseenIn(k) ? `<i class="bcj-dotnew" data-tooltip="Something new"></i>` : ""}</a>`).join("");
     const sorter = (key) => this.view.sorts[key] === "az"
       ? `<a class="bcj-sort" data-action="bcjSort" data-sort="${key}" data-tooltip="Show the newest first"><i class="fa-solid fa-clock"></i> Newest</a>`
@@ -756,17 +806,51 @@ class JournalApp extends foundry.applications.api.ApplicationV2 {
     const noFolders = this.isGM && !findFolder("root");
     // On the Players tab one toggle sorts every player's group, so it sits once, above them.
     const bar = this.isGM && this.view.tab === "players" && groups.length ? `<div class="bcj-gh bcj-listbar"><span>Every player's list</span>${sorter("players")}</div>` : "";
-    const listBody = shown.length || groups.length ? bar + list : "";
+    const listBody = qtab ? this.#questList(quests) : shown.length || groups.length ? bar + list : "";
 
     return `<div class="bcj-shell">
-      <nav class="bcj-rail">${rail}<div class="bcj-railfoot"><a data-action="bcjExport" data-tooltip="Download this tab's entries as one Markdown file"><i class="fa-solid fa-file-export"></i><span>Export</span></a>${this.isGM ? `<a data-action="bcjFolders" data-tooltip="Show the journal's folders in the Journal tab"><i class="fa-solid fa-folder-tree"></i><span>Folders</span></a>` : ""}</div></nav>
+      <nav class="bcj-rail">${rail}<div class="bcj-railfoot">${qtab ? "" : `<a data-action="bcjExport" data-tooltip="Download this tab's entries as one Markdown file"><i class="fa-solid fa-file-export"></i><span>Export</span></a>`}${this.isGM ? `<a data-action="bcjFolders" data-tooltip="Show the journal's folders in the Journal tab"><i class="fa-solid fa-folder-tree"></i><span>Folders</span></a>` : ""}</div></nav>
       <section class="bcj-list">
         <div class="bcj-search"><i class="fa-solid fa-magnifying-glass"></i><input type="search" name="bcj-q" placeholder="Search the journal" value="${esc(this.view.query)}"></div>
-        ${this.isGM ? `<div class="bcj-actions"><button type="button" data-action="bcjNewRecap" data-tooltip="New session recap"><i class="fa-solid fa-plus"></i> Recap</button><button type="button" data-action="bcjNewHandout" data-tooltip="New handout"><i class="fa-solid fa-plus"></i> Handout</button><button type="button" data-action="bcjNewPage" data-tooltip="New page in the party journal, such as Lines and Veils or house rules"><i class="fa-solid fa-plus"></i> Page</button></div>` : this.view.tab === "mine" ? `<div class="bcj-actions"><button type="button" data-action="bcjNewEntry"><i class="fa-solid fa-feather"></i> New entry</button></div>` : this.view.tab === "party" ? `<div class="bcj-actions"><button type="button" data-action="bcjNewParty" data-tooltip="An entry everyone can read, signed with your name"><i class="fa-solid fa-feather"></i> New party entry</button></div>` : ""}
+        ${qtab ? "" : this.isGM ? `<div class="bcj-actions"><button type="button" data-action="bcjNewRecap" data-tooltip="New session recap"><i class="fa-solid fa-plus"></i> Recap</button><button type="button" data-action="bcjNewHandout" data-tooltip="New handout"><i class="fa-solid fa-plus"></i> Handout</button><button type="button" data-action="bcjNewPage" data-tooltip="New page in the party journal, such as Lines and Veils or house rules"><i class="fa-solid fa-plus"></i> Page</button></div>` : this.view.tab === "mine" ? `<div class="bcj-actions"><button type="button" data-action="bcjNewEntry"><i class="fa-solid fa-feather"></i> New entry</button></div>` : this.view.tab === "party" ? `<div class="bcj-actions"><button type="button" data-action="bcjNewParty" data-tooltip="An entry everyone can read, signed with your name"><i class="fa-solid fa-feather"></i> New party entry</button></div>` : ""}
         <div class="bcj-scroll">${noFolders ? `<p class="bcj-none">The journal's folders are being made.</p>` : listBody}<p class="bcj-none bcj-nomatch" hidden>Nothing matches.</p></div>
       </section>
-      <section class="bcj-read">${current ? await this.#page(current) : this.#empty()}</section>
+      <section class="bcj-read">${qtab ? this.#questPage(quest, qapi) : current ? await this.#page(current) : this.#empty()}</section>
     </div>`;
+  }
+
+  /** The Quests tab's list: by status, with each quest's category and progress, marks and icons. */
+  #questList(quests) {
+    if (!quests.length) return `<p class="bcj-none">${this.isGM ? "No quests yet. Make them in Campaign Trackers." : "No quests yet."}</p>`;
+    const foldKey = (heading) => `quests:${heading}`;
+    return QUEST_GROUPS.map(([status, heading]) => {
+      const items = quests.filter((q) => (QUEST_GROUPS.some(([k]) => k === q.status) ? q.status : "active") === status);
+      if (!items.length) return "";
+      const folded = !!this.view.folded[foldKey(heading)];
+      const rows = items.map((q) => {
+        const sub = [q.category, q.total ? `${q.done}/${q.total}` : ""].filter(Boolean).join(" · ");
+        const icons = `${q.party ? `<i class="fa-solid fa-users" data-tooltip="A party quest"></i>` : ""}${q.focus ? `<i class="fa-solid fa-star" data-tooltip="The party's focus"></i>` : ""}`;
+        const mark = q.mark && q.id !== this.view.quest ? `<b class="bcj-new bcj-${q.mark}">${q.mark === "new" ? "New" : "Updated"}</b>` : "";
+        return `<a class="bcj-item bcj-qitem bcj-qs-${esc(q.status)} ${q.revealed ? "" : "bcj-qhidden"} ${q.id === this.view.quest ? "active" : ""}" data-action="bcjQuest" data-quest="${esc(q.id)}" data-entry="quest:${esc(q.id)}" draggable="true">
+          <span class="bcj-it">${q.revealed ? "" : `<i class="fa-solid fa-eye-slash" data-tooltip="Players can't see it yet"></i> `}${esc(q.name)}</span><span class="bcj-is">${mark}${esc(sub)}</span><span class="bcj-iw">${icons}</span></a>`;
+      }).join("");
+      return `<div class="bcj-group ${folded ? "bcj-folded" : ""}" data-group="${esc(heading)}"><div class="bcj-gh"><a class="bcj-fold" data-action="bcjFold" data-fold="${esc(foldKey(heading))}" data-tooltip="${folded ? "Show this group" : "Fold this group"}"><i class="fa-solid ${folded ? "fa-chevron-right" : "fa-chevron-down"}"></i> ${esc(heading)}${folded ? ` <span class="bcj-count">${items.length}</span>` : ""}</a></div>${rows}</div>`;
+    }).join("");
+  }
+
+  /** A quest in the reading pane, drawn by Trackers as the players see it. */
+  #questPage(q, api) {
+    if (!q) return `<article class="bcj-page bcj-blank"><p class="bcj-hint">${this.isGM ? "Quests made in Campaign Trackers show here as the players see them." : "No quests yet."}</p></article>`;
+    const meta = [q.statusLabel, q.category, q.total ? `${q.done} of ${q.total} objectives` : ""].filter(Boolean).join(" · ");
+    const body = q.revealed ? api?.questHTML(q.id) : null;
+    const note = this.isGM
+      ? `<p class="bcj-hint">${q.revealed ? "As the players see it. Open it in Trackers for hidden parts, GM notes and editing." : "Players can't see this quest yet. Open it in Trackers to write it or reveal it."}</p>`
+      : "";
+    return `<article class="bcj-page bcj-quest" data-quest="${esc(q.id)}">
+      <header class="bcj-ph"><div><h1>${esc(q.name)}</h1><div class="bcj-meta">${esc(meta)}</div></div></header>
+      <div class="bcj-tools"><button type="button" data-action="bcjQuestOpen" data-tooltip="${this.isGM ? "Open it in Campaign Trackers" : "Open it in Campaign Trackers to tick objectives and add notes"}"><i class="fa-solid fa-scroll"></i> Open in Trackers</button></div>
+      ${note}<div class="bcj-text bcj-qtext">${body ?? (this.isGM ? "" : `<p class="bcj-hint">This quest isn't open to you.</p>`)}</div>
+    </article>`;
   }
 
   #empty() {
@@ -898,12 +982,37 @@ class JournalApp extends foundry.applications.api.ApplicationV2 {
       toc.hidden = false;
     }
     this.#dragPins();
+    this.#questEvents();
     const input = el.querySelector('input[name="bcj-q"]');
     input?.addEventListener("input", () => {
       this.view.query = input.value;
       this.#filter();
     });
     this.#filter();
+  }
+
+  /** On the Quests tab: drag a quest into a journal page as a link; links in the quest go to that quest or sheet. */
+  #questEvents() {
+    if (this.view.tab !== "quests") return;
+    for (const a of this.element.querySelectorAll(".bcj-qitem")) {
+      a.addEventListener("dragstart", (ev) => {
+        const name = a.querySelector(".bcj-it")?.textContent.trim().replace(/[{}]/g, "") ?? "";
+        ev.dataTransfer.setData("text/plain", `@Quest[${a.dataset.quest}]{${name}}`);
+      });
+    }
+    this.element.querySelector(".bcj-qtext")?.addEventListener("click", async (ev) => {
+      const go = ev.target.closest("[data-pct-action]");
+      if (!go) return;
+      ev.preventDefault();
+      if (go.dataset.pctAction === "pctQuestGo" && go.dataset.qid) {
+        this.view.quest = go.dataset.qid;
+        this.render();
+      } else if (go.dataset.pctAction === "pctOpenActor" && go.dataset.uuid) {
+        const actor = await fromUuid(go.dataset.uuid);
+        if (actor?.testUserPermission(game.user, "OBSERVER")) actor.sheet.render(true);
+        else ui.notifications.info("You can't open that yet.");
+      }
+    });
   }
 
   /** The GM drags pinned entries up and down; the order is saved on the entries for everyone. */
@@ -971,6 +1080,24 @@ class JournalApp extends foundry.applications.api.ApplicationV2 {
     if (none) none.hidden = !q || any;
     // While searching, matches show even in folded groups.
     el.querySelector(".bcj-scroll")?.classList.toggle("bcj-searching", !!q);
+  }
+
+  static #onQuest(event, target) {
+    this.view.quest = target.dataset.quest;
+    this.render();
+  }
+
+  static #onQuestOpen() {
+    const api = questApi();
+    if (api && this.view.quest) api.openQuest(this.view.quest);
+  }
+
+  /** Show a quest on the Quests tab (from a quest link in the window). */
+  showQuest(id) {
+    this.view.tab = "quests";
+    this.view.quest = id;
+    this.view.query = "";
+    this.render();
   }
 
   static #onTab(event, target) {
@@ -1693,6 +1820,15 @@ Hooks.on("updateJournalEntry", (entry, change) => (inJournal(entry) || "folder" 
 for (const hook of ["createJournalEntryPage", "updateJournalEntryPage", "deleteJournalEntryPage"]) Hooks.on(hook, (page) => inJournal(page.parent) && refresh());
 for (const hook of ["createFolder", "updateFolder", "deleteFolder"]) Hooks.on(hook, (folder) => folder.type === "JournalEntry" && refresh());
 Hooks.on("createJournalEntry", (entry) => noticeNew(entry));
+// Trackers' quests changed (or this user's New/Updated marks): redraw, for the Quests tab and its dot.
+Hooks.on(`${TRACKERS}.changed`, () => refresh());
+// A quest link clicked in this window opens the quest on the Quests tab instead of in Trackers.
+Hooks.on(`${TRACKERS}.questLink`, (id, link) => {
+  const app = [...openApps].find((a) => a.rendered && a.element?.contains(link));
+  if (!app || !questApi()) return;
+  app.showQuest(id);
+  return false;
+});
 Hooks.on("updateJournalEntry", (entry, change) => {
   if ("ownership" in change || "folder" in change) noticeNew(entry);
 });
