@@ -619,7 +619,7 @@ class JournalApp extends foundry.applications.api.ApplicationV2 {
     // GM: one group per player, with their journal and the handouts only some players have.
     return game.users.filter((u) => !u.isGM).sort((a, b) => a.name.localeCompare(b.name)).map((u) => [
       who(u).name === u.name ? u.name : `${u.name} (${who(u).name})`,
-      [...all.filter((d) => d.area === "player" && d.user === u.id).sort(journalOrder), ...all.filter((d) => d.kind === "handout" && !d.all && d.readers.some((r) => r.id === u.id)).sort(byName)],
+      [...all.filter((d) => d.area === "player" && d.user === u.id).sort(journalOrder), ...all.filter((d) => d.kind === "handout" && !d.all && d.readers.some((r) => r.id === u.id)).sort(journalOrder)],
       "Nothing yet.",
       true,
     ]);
