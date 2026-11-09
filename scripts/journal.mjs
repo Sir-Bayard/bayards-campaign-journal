@@ -495,12 +495,14 @@ function loadSize() {
     return {};
   }
   if (!v || typeof v !== "object") return {};
+  // A size saved while the window was collapsed is no size at all.
+  if (!(v.width >= 400 && v.height >= 250)) return {};
   const out = {};
   const W = window.innerWidth, H = window.innerHeight;
-  if (Number.isFinite(v.width)) out.width = Math.max(640, Math.min(v.width, W));
-  if (Number.isFinite(v.height)) out.height = Math.max(420, Math.min(v.height, H));
-  if (Number.isFinite(v.left)) out.left = Math.max(0, Math.min(v.left, W - (out.width ?? 640)));
-  if (Number.isFinite(v.top)) out.top = Math.max(0, Math.min(v.top, H - (out.height ?? 420)));
+  if (Number.isFinite(v.width)) out.width = Math.max(400, Math.min(v.width, W));
+  if (Number.isFinite(v.height)) out.height = Math.max(250, Math.min(v.height, H));
+  if (Number.isFinite(v.left)) out.left = Math.max(0, Math.min(v.left, W - (out.width ?? 400)));
+  if (Number.isFinite(v.top)) out.top = Math.max(0, Math.min(v.top, H - (out.height ?? 250)));
   return out;
 }
 let sizeTimer = null;
@@ -694,11 +696,32 @@ class JournalApp extends foundry.applications.api.ApplicationV2 {
     openApps.delete(this);
   }
 
-  /** Remember the size and place the user gives the window (not while it's minimized). */
+  /* Foundry restores a minimized window to its measured size on screen, which is smaller than its real size when
+   * the interface is scaled; keep the real size from before and put it back. */
+  #beforeMin = null;
+  #restoring = false;
+  async minimize() {
+    if (!this.minimized && this.rendered) this.#beforeMin = { width: this.position.width, height: this.position.height };
+    return super.minimize();
+  }
+  async maximize() {
+    if (!this.minimized) return super.maximize();
+    const was = this.#beforeMin;
+    this.#restoring = true;
+    try {
+      await super.maximize();
+    } finally {
+      this.#restoring = false;
+    }
+    if (was) this.setPosition(was);
+  }
+
+  /** Remember the size and place the user gives the window (not while it's minimized or being restored). */
   _onPosition(position) {
     super._onPosition?.(position);
-    if (!this.rendered || this.minimized) return;
+    if (!this.rendered || this.minimized || this.#restoring) return;
     if (![position.width, position.height, position.left, position.top].every(Number.isFinite)) return;
+    if (position.width < 400 || position.height < 250) return;
     saveSize(position);
   }
 
@@ -996,8 +1019,10 @@ class JournalApp extends foundry.applications.api.ApplicationV2 {
         app.view.tab = d.area === "party" || (d.kind === "handout" && d.all) ? "party" : game.user.isGM ? (d.kind === "handout" ? "handouts" : "players") : "mine";
       }
     }
-    app.render({ force: true });
-    if (app.minimized) app.maximize();
+    // Restore a minimized window before drawing it: a draw that ends while it's still collapsed would take the
+    // title bar's height as its size.
+    if (app.minimized) app.maximize().then(() => app.render({ force: true }));
+    else app.render({ force: true });
     return app;
   }
 }
