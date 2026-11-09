@@ -199,10 +199,15 @@ const isPrimaryGM = () => game.user.isGM && game.users.activeGM?.id === game.use
  * id and tells the others about itself; only the tab with the lowest id among the primary GM's live tabs acts. */
 const CLIENT_ID = globalThis.foundry?.utils?.randomID?.(16) ?? Math.random().toString(36).slice(2, 18);
 const gmTabs = new Map();
+/* A hidden tab's timers can slow to about once a minute, so a tab is forgotten only after 150 s without a word, and
+ * each tab answers an announcement from a tab with a higher id (socket messages aren't slowed), so the leader stays
+ * known while it lives. */
+const TAB_TTL = 150000;
+let lastAnswer = 0;
 function iAmLeader() {
   if (!isPrimaryGM()) return false;
   const now = Date.now();
-  for (const [id, seen] of gmTabs) if (now - seen > 45000) gmTabs.delete(id);
+  for (const [id, seen] of gmTabs) if (now - seen > TAB_TTL) gmTabs.delete(id);
   return [...gmTabs.keys()].every((id) => CLIENT_ID < id);
 }
 /** Which GM tab acts, for checking from the console. */
@@ -1531,7 +1536,10 @@ function onSocket(msg, senderId) {
   if (game.user.isGM) {
     if (msg.type === "gmtab" && sender?.id === game.user.id && typeof msg.client === "string") {
       gmTabs.set(msg.client, Date.now());
-      if (msg.hello) announceTab(false);
+      if (msg.hello || (msg.client > CLIENT_ID && Date.now() - lastAnswer > 5000)) {
+        lastAnswer = Date.now();
+        announceTab(false);
+      }
     } else if (msg.type === "gmbye" && sender?.id === game.user.id) gmTabs.delete(msg.client);
     else if (sender && !sender.isGM && ["create", "party", "edit", "share"].includes(msg.type) && iAmLeader()) onRequest(msg, sender);
     return;

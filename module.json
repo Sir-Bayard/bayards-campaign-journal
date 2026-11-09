@@ -2,7 +2,7 @@
   "id": "bayards-campaign-journal",
   "title": "Bayard's Campaign Journal",
   "description": "A journal window for the party: session recaps and standing pages, handouts for one player or several, and each player's private journal, all kept as ordinary journal entries.",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "compatibility": {
     "minimum": "14",
     "verified": "14.369",

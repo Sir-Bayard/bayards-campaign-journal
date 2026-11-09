@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.1
+
+- A GM with a tab in the background no longer has two tabs answering players' requests at once, which could make a player's entry twice. Background tabs check in less often, so a GM tab is now remembered longer and answers the others when they check in.
+
 ## 0.1.0
 
 First release.
