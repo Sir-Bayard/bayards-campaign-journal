@@ -13,11 +13,13 @@
 - Show to players opens an entry on the screens of the players who can read it. "Previously on…" shows a recap's short version on every player's screen, with a button to read the rest.
 - New page, for party pages such as house rules, optionally pinned. Pin anything on the Party tab to the top: pages, recaps, shared copies and handouts for everyone. The GM drags pinned entries into the order everyone sees; a new pin goes to the bottom.
 - Markdown: download an entry, or the whole tab with Export.
-- Players write their own entries (New entry, then Foundry's editor); only they and the GM can read them. A GM's client makes the entry, so players don't need the right to create journal entries.
+- Players write their own entries (New entry, then Foundry's editor); only they and the GM can read them. Their journal lists newest first, with an A-Z toggle.
+- When players may create journal entries (Foundry's permission), their new entries, party entries and shared copies are made on their own client, so they can write with no GM logged in. Otherwise a GM's client makes them.
+- Renaming a one-page entry's page in Foundry's editor renames the entry too.
 - Share a copy to the Party Journal: a copy signed "Shared by" the player, which everyone can read and the player can still edit. Sharing the same entry again asks first, then replaces the earlier copy in place.
 - New party entry: players write straight into the party journal, signed with their name.
 - Let the party edit: the GM, or the player who wrote or shared an entry, lets every player edit it and add to it, and can stop it again. Updating a shared copy warns first when others may have added to it.
-- Players can delete their own entries, their shared copies and their party entries.
+- Players can delete their own entries, their shared copies and their party entries; the GM can delete anything from the window.
 - A short notice when something new reaches a player (a recap, a handout given to them, a shared or party entry), and New or Updated markers in their list until they open it, with a dot on the tab. Edits show as Updated without a notice, and never for a player's own changes.
 - The Campaign Journal folder is hidden from players' Journal tab, so they read everything in the window; a setting shows it again.
 - "Previously on…" pops up on the GM's screen too, even when no player is logged in, so you see what they see.
