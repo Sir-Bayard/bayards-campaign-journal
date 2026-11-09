@@ -16,6 +16,10 @@ A journal window for the party, for Foundry VTT 14 and any game system. It keeps
 
 **A player's journal.** Private to the player and the GM, newest first. A player can share a copy to the party journal, and the copy stays theirs to edit.
 
+![The Quests tab](docs/images/quests.png)
+
+**The Quests tab.** With PF2e Campaign Trackers installed, the party's quests by status, read in the journal as the players see them, with a button to open the quest in Trackers.
+
 ![A new recap](docs/images/new-recap.png)
 
 **A new recap.** Paste or import a Markdown recap; the session, title, dates and who was absent fill themselves in.
