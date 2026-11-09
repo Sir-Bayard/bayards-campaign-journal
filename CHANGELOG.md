@@ -13,7 +13,7 @@
 - Show to players opens an entry on the screens of the players who can read it. "Previously on…" shows a recap's short version on every player's screen, with a button to read the rest.
 - New page, for party pages such as house rules, optionally pinned. Pin anything on the Party tab to the top: pages, recaps, shared copies and handouts for everyone. The GM drags pinned entries into the order everyone sees; a new pin goes to the bottom.
 - Markdown: download an entry, or the whole tab with Export.
-- Players write their own entries (New entry, then Foundry's editor); only they and the GM can read them. Their journal lists newest first, with an A-Z toggle.
+- Players write their own entries (New entry, then Foundry's editor); only they and the GM can read them. Their journal and their handouts list newest first, each with its own A-Z toggle; on the GM's Players tab one toggle sorts every player's list. A-Z files titles library-style (a leading A, An or The ignored, numbers in order).
 - When players may create journal entries (Foundry's permission), their new entries, party entries and shared copies are made on their own client, so they can write with no GM logged in. Otherwise a GM's client makes them.
 - Renaming a one-page entry's page in Foundry's editor renames the entry too.
 - Share a copy to the Party Journal: a copy signed "Shared by" the player, which everyone can read and the player can still edit. Sharing the same entry again asks first, then replaces the earlier copy in place.

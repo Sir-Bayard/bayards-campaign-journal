@@ -242,7 +242,12 @@ function readable() {
   return out;
 }
 
-const byName = (a, b) => (a.sort - b.sort) || a.name.localeCompare(b.name);
+/** A title as it files: a leading "A", "An" or "The" (and opening quotes or brackets) left out. */
+function titleKey(name) {
+  return String(name ?? "").trim().replace(/^[\s"'\u201c\u2018([]+/, "").replace(/^(the|an|a)\s+/i, "");
+}
+/** By title, library-style: articles ignored, case ignored, numbers in order (Session 2 before Session 10). */
+const byName = (a, b) => titleKey(a.name).localeCompare(titleKey(b.name), undefined, { numeric: true, sensitivity: "base" }) || String(a.name).localeCompare(String(b.name));
 /** Newest first (by when the entry was made), then by name. */
 const byNewest = (a, b) => ((b.created ?? 0) - (a.created ?? 0)) || a.name.localeCompare(b.name);
 
@@ -499,7 +504,7 @@ function loadView() {
 }
 function saveView(v) {
   try {
-    localStorage.setItem(VIEW_KEY, JSON.stringify({ tab: v.tab, entry: v.entry, sort: v.sort }));
+    localStorage.setItem(VIEW_KEY, JSON.stringify({ tab: v.tab, entry: v.entry, sorts: v.sorts }));
   } catch {
     /* no storage: the view resets on reload */
   }
@@ -573,7 +578,7 @@ class JournalApp extends foundry.applications.api.ApplicationV2 {
   constructor(options = {}) {
     super(foundry.utils.mergeObject({ position: loadSize() }, options));
     const saved = loadView();
-    this.view = { tab: saved.tab ?? "party", entry: saved.entry ?? null, query: "", sort: saved.sort === "az" ? "az" : "newest" };
+    this.view = { tab: saved.tab ?? "party", entry: saved.entry ?? null, query: "", sorts: saved.sorts && typeof saved.sorts === "object" ? { ...saved.sorts } : {} };
     this.texts = new Map();
   }
 
@@ -588,9 +593,10 @@ class JournalApp extends foundry.applications.api.ApplicationV2 {
       : [["party", "Party", "fa-solid fa-users"], ["mine", "My Journal", "fa-solid fa-feather"]];
   }
 
-  /** A tab's groups (the current tab unless named): [heading, entries, empty text, sortable]. */
+  /** A tab's groups (the current tab unless named): [heading, entries, empty text, the key of its sort toggle]. */
   groups(all, tab = this.view.tab) {
-    const journalOrder = this.view.sort === "az" ? byName : byNewest;
+    // Each kind of list has its own Newest / A-Z choice; every player's group on the Players tab shares one.
+    const orderFor = (key) => (this.view.sorts[key] === "az" ? byName : byNewest);
     if (tab === "party") {
       // Anything on this tab can be pinned to the top: pages, recaps, shared copies, handouts for everyone.
       const party = all.filter((d) => d.area === "party");
@@ -604,8 +610,8 @@ class JournalApp extends foundry.applications.api.ApplicationV2 {
     }
     if (tab === "mine") {
       return [
-        ["My entries", all.filter((d) => d.area === "player" && d.user === game.user.id).sort(journalOrder), "Nothing written yet.", true],
-        ["Handouts for me", all.filter((d) => d.kind === "handout" && !d.all).sort(byName), null],
+        ["My entries", all.filter((d) => d.area === "player" && d.user === game.user.id).sort(orderFor("mine")), "Nothing written yet.", "mine"],
+        ["Handouts for me", all.filter((d) => d.kind === "handout" && !d.all).sort(orderFor("myHandouts")), null, "myHandouts"],
       ];
     }
     if (tab === "handouts") {
@@ -619,9 +625,9 @@ class JournalApp extends foundry.applications.api.ApplicationV2 {
     // GM: one group per player, with their journal and the handouts only some players have.
     return game.users.filter((u) => !u.isGM).sort((a, b) => a.name.localeCompare(b.name)).map((u) => [
       who(u).name === u.name ? u.name : `${u.name} (${who(u).name})`,
-      [...all.filter((d) => d.area === "player" && d.user === u.id).sort(journalOrder), ...all.filter((d) => d.kind === "handout" && !d.all && d.readers.some((r) => r.id === u.id)).sort(journalOrder)],
+      [...all.filter((d) => d.area === "player" && d.user === u.id), ...all.filter((d) => d.kind === "handout" && !d.all && d.readers.some((r) => r.id === u.id))].sort(orderFor("players")),
       "Nothing yet.",
-      true,
+      null,
     ]);
   }
 
@@ -643,13 +649,15 @@ class JournalApp extends foundry.applications.api.ApplicationV2 {
     };
     const unseenIn = (k) => !this.isGM && this.groups(all, k).some(([, items]) => items.some((d) => freshness(d)));
     const rail = tabs.map(([k, label, icon]) => `<a class="bcj-tab ${k === this.view.tab ? "active" : ""}" data-action="bcjTab" data-tab="${k}"><i class="${icon}"></i><span>${label}</span>${unseenIn(k) ? `<i class="bcj-dotnew" data-tooltip="Something new"></i>` : ""}</a>`).join("");
-    const sorter = this.view.sort === "az"
-      ? `<a class="bcj-sort" data-action="bcjSort" data-tooltip="Show the newest entries first"><i class="fa-solid fa-clock"></i> Newest</a>`
-      : `<a class="bcj-sort" data-action="bcjSort" data-tooltip="Sort entries by title"><i class="fa-solid fa-arrow-down-a-z"></i> A-Z</a>`;
-    const list = groups.map(([heading, items, empty, sortable]) => `<div class="bcj-group" data-group="${esc(heading)}"><div class="bcj-gh"><span>${esc(heading)}</span>${sortable ? sorter : ""}</div>${items.length ? items.map((d) => `<a class="bcj-item ${d.id === this.view.entry ? "active" : ""}" data-action="bcjEntry" data-entry="${esc(d.id)}">
+    const sorter = (key) => this.view.sorts[key] === "az"
+      ? `<a class="bcj-sort" data-action="bcjSort" data-sort="${key}" data-tooltip="Show the newest first"><i class="fa-solid fa-clock"></i> Newest</a>`
+      : `<a class="bcj-sort" data-action="bcjSort" data-sort="${key}" data-tooltip="Sort by title"><i class="fa-solid fa-arrow-down-a-z"></i> A-Z</a>`;
+    const list = groups.map(([heading, items, empty, sortKey]) => `<div class="bcj-group" data-group="${esc(heading)}"><div class="bcj-gh"><span>${esc(heading)}</span>${sortKey ? sorter(sortKey) : ""}</div>${items.length ? items.map((d) => `<a class="bcj-item ${d.id === this.view.entry ? "active" : ""}" data-action="bcjEntry" data-entry="${esc(d.id)}">
         <span class="bcj-it">${esc(d.name)}</span><span class="bcj-is">${mark(d)}${esc(subline(d))}</span><span class="bcj-iw">${dots(d)}</span></a>`).join("") : `<p class="bcj-none">${esc(empty)}</p>`}</div>`).join("");
     const noFolders = this.isGM && !findFolder("root");
-    const listBody = shown.length || groups.length ? list : "";
+    // On the Players tab one toggle sorts every player's group, so it sits once, above them.
+    const bar = this.isGM && this.view.tab === "players" && groups.length ? `<div class="bcj-gh bcj-listbar"><span>Every player's list</span>${sorter("players")}</div>` : "";
+    const listBody = shown.length || groups.length ? bar + list : "";
 
     return `<div class="bcj-shell">
       <nav class="bcj-rail">${rail}<div class="bcj-railfoot"><a data-action="bcjExport" data-tooltip="Download this tab's entries as one Markdown file"><i class="fa-solid fa-file-export"></i><span>Export</span></a>${this.isGM ? `<a data-action="bcjFolders" data-tooltip="Show the journal's folders in the Journal tab"><i class="fa-solid fa-folder-tree"></i><span>Folders</span></a>` : ""}</div></nav>
@@ -1056,8 +1064,10 @@ class JournalApp extends foundry.applications.api.ApplicationV2 {
     askGM({ type: "edit", entry: entry.id, on }, "Campaign Journal: a GM needs to be logged in to change who can edit it.");
   }
 
-  static #onSort() {
-    this.view.sort = this.view.sort === "az" ? "newest" : "az";
+  static #onSort(event, target) {
+    const key = target.dataset.sort;
+    if (!["mine", "myHandouts", "players"].includes(key)) return;
+    this.view.sorts[key] = this.view.sorts[key] === "az" ? "newest" : "az";
     this.render();
   }
 
@@ -1517,4 +1527,4 @@ if (globalThis.game?.ready) {
   start();
 }
 
-export { kindFor, levelFor, readersOf, compareRecaps, matches, stripTags, esc, KINDS, parseRecap, recapName, ownershipFor, slug, splitDetails, shiftHeadings, freshnessOf, freshFor, editOwnership, partyEdits, comparePinned, moveId, byNewest };
+export { kindFor, levelFor, readersOf, compareRecaps, matches, stripTags, esc, KINDS, parseRecap, recapName, ownershipFor, slug, splitDetails, shiftHeadings, freshnessOf, freshFor, editOwnership, partyEdits, comparePinned, moveId, byNewest, byName, titleKey };
