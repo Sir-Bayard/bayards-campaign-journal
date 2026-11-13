@@ -37,8 +37,10 @@ function levelFor(ownership, userId) {
   return own.default ?? LEVEL.NONE;
 }
 
-/** The players (non-GM users) who can read a document with this ownership, and whether it's shared with every
- * player (by its default level, so players who join later see it too), not just the ones who happen to be here. */
+/**
+ * The players (non-GM users) who can read a document, and whether its default level shares it with every player,
+ * including ones who join later.
+ */
 function readersOf(ownership, users) {
   const players = users.filter((u) => !u.isGM);
   const readers = players.filter((u) => levelFor(ownership, u.id) >= LEVEL.OBSERVER);
@@ -60,8 +62,10 @@ function matches(query, title, text) {
   return words.every((w) => hay.includes(w));
 }
 
-/** Read a recap laid out the session-recap way: "# Session N: Title", an italic line, a "## Short" section, then
- * the rest. Returns { session, title, subtitle, short, body }, with short and body still Markdown. */
+/**
+ * Read a Markdown recap: "# Session N: Title", an italic line, a "## Short" section, then the rest (each part
+ * optional). Returns { session, title, subtitle, short, body }, with short and body still Markdown.
+ */
 function parseRecap(md) {
   const lines = String(md ?? "").replace(/\r\n?/g, "\n").split("\n");
   let i = 0;
@@ -199,9 +203,9 @@ const isPrimaryGM = () => game.user.isGM && game.users.activeGM?.id === game.use
  * id and tells the others about itself; only the tab with the lowest id among the primary GM's live tabs acts. */
 const CLIENT_ID = globalThis.foundry?.utils?.randomID?.(16) ?? Math.random().toString(36).slice(2, 18);
 const gmTabs = new Map();
-/* A hidden tab's timers can slow to about once a minute, so a tab is forgotten only after 150 s without a word, and
- * each tab answers an announcement from a tab with a higher id (socket messages aren't slowed), so the leader stays
- * known while it lives. */
+/* Tabs announce themselves every 15 s, but a hidden tab's timers can slow to about once a minute, so a tab is
+ * forgotten only after 150 s without a word. Each tab also answers a new tab's hello and, at most every 5 s, an
+ * announcement from a tab with a higher id (socket messages aren't slowed), so the leader stays known while it lives. */
 const TAB_TTL = 150000;
 let lastAnswer = 0;
 function iAmLeader() {
@@ -216,10 +220,10 @@ function announceTab(hello = false) {
   if (game.user.isGM) game.socket.emit(SOCKET, { type: "gmtab", client: CLIENT_ID, hello });
 }
 
-/** Make the journal's folders, and one for each player, if they're missing. Only the active GM's lead tab does
- * this; a call while it runs asks for one more pass, so nothing in between is missed. */
 let ensuring = null;
 let ensureAgain = false;
+/** Make the journal's folders, and one for each player, if they're missing. Only the active GM's lead tab does
+ * this; a call while it runs asks for one more pass, so nothing in between is missed. */
 async function ensureFolders() {
   if (!iAmLeader()) return;
   if (ensuring) {
@@ -266,7 +270,7 @@ function describe(entry) {
   return { entry, id: entry.id, name: entry.name, kind, area: where.area, user: where.user, pinned: !!f.pinned, pinOrder: Number.isFinite(f.pinOrder) ? f.pinOrder : null, sharedBy: f.sharedBy ?? null, sharedFrom: f.sharedFrom ?? null, author: f.author ?? f.sharedBy ?? null, editable: partyEdits(entry.ownership), subtitle: f.subtitle ?? "", session: f.session ?? null, date: f.date ?? null, played: f.played ?? null, attended: Array.isArray(f.attended) ? f.attended : [], readers, all, sort: entry.sort ?? 0, created: entry._stats?.createdTime ?? 0 };
 }
 
-/** Every journal entry this user can read. */
+/** What the journal knows (see describe) of every entry in its folders this user can read. */
 function readable() {
   const out = [];
   for (const entry of game.journal) {
@@ -286,7 +290,7 @@ const byName = (a, b) => titleKey(a.name).localeCompare(titleKey(b.name), undefi
 /** Newest first (by when the entry was made), then by name. */
 const byNewest = (a, b) => ((b.created ?? 0) - (a.created ?? 0)) || a.name.localeCompare(b.name);
 
-/** Pinned entries in the GM's order; any without a place yet (pinned before ordering existed) after them, by name. */
+/** Pinned entries in the GM's order; any without a place yet after them, by name. */
 function comparePinned(a, b) {
   const pa = Number.isFinite(a.pinOrder) ? a.pinOrder : null;
   const pb = Number.isFinite(b.pinOrder) ? b.pinOrder : null;
@@ -310,7 +314,7 @@ function listOf(names) {
   return `${names.slice(0, -1).join(", ")} and ${names.at(-1)}`;
 }
 
-/** A short name and initial for a user: their character's name if they have one. */
+/** A user's short name (their character's, if they have one), initial and color. */
 function who(user) {
   const name = user?.character?.name ?? user?.name ?? "?";
   return { name, initial: name.trim().charAt(0).toUpperCase() || "?", color: user?.color?.css ?? String(user?.color ?? "#888") };
@@ -472,7 +476,7 @@ function saveSeen(map) {
 function stampOf(entry) {
   return Math.max(entry._stats?.createdTime ?? 0, ...entry.pages.contents.map((p) => Math.max(p._stats?.modifiedTime ?? 0, p._stats?.createdTime ?? 0)));
 }
-/** Who made an entry's latest content change: whoever last changed its newest page. */
+/** Who made an entry's latest content change: whoever last changed the most recently modified page. */
 function lastBy(entry) {
   let best = null;
   for (const p of entry.pages.contents) if (!best || (p._stats?.modifiedTime ?? 0) > (best.modifiedTime ?? 0)) best = p._stats;
@@ -494,11 +498,12 @@ function markSeen(entry) {
  * Later loads drop entries that no longer exist. */
 function seedSeen() {
   if (game.user.isGM) return;
+  // Clear the old keys that every world and user shared.
   try {
     localStorage.removeItem(`${MOD}.seen`);
     localStorage.removeItem(`${MOD}.view`);
   } catch {
-    /* the old, shared keys */
+    /* no storage: nothing to clear */
   }
   const had = seenMap();
   if (had) {
@@ -511,8 +516,9 @@ function seedSeen() {
   saveSeen(map);
 }
 
-/** A short notice when something new reaches this player: a recap, a handout, a page or a shared entry. */
+/** Entries this player has already had a notice for. */
 const noticed = new Set();
+/** A short notice when something new reaches this player: a recap, a handout, a page or a shared entry. */
 function noticeNew(entry) {
   if (game.user.isGM || noticed.has(entry.id) || !entry.testUserPermission(game.user, "OBSERVER")) return;
   const d = describe(entry);
@@ -711,7 +717,7 @@ class JournalApp extends foundry.applications.api.ApplicationV2 {
     return game.user.isGM;
   }
 
-  /** The tabs this user has: Party, then My Journal for players, or Handouts and Players for GMs. */
+  /** Tabs: Party, then My Journal (players) or Handouts and Players (GMs), then Quests if Trackers offers them. */
   tabs() {
     const tabs = this.isGM
       ? [["party", "Party", "fa-solid fa-users"], ["handouts", "Handouts", "fa-solid fa-envelope-open-text"], ["players", "Players", "fa-solid fa-user-group"]]
@@ -725,7 +731,7 @@ class JournalApp extends foundry.applications.api.ApplicationV2 {
   groups(all, tab = this.view.tab) {
     // The Quests tab lists Trackers' quests, not journal entries.
     if (tab === "quests") return [];
-    // Each kind of list has its own Newest / A-Z choice; every player's group on the Players tab shares one.
+    // Newest / A-Z choices: one each for My entries and Handouts for me, one shared by the Players tab's groups.
     const orderFor = (key) => (this.view.sorts[key] === "az" ? byName : byNewest);
     if (tab === "party") {
       // Anything on this tab can be pinned to the top: pages, recaps, shared copies, handouts for everyone.
@@ -785,7 +791,7 @@ class JournalApp extends foundry.applications.api.ApplicationV2 {
       this.view.quest = (quests.find((q) => q.status === "active" && q.revealed) ?? quests.find((q) => q.revealed) ?? quests[0])?.id ?? null;
       saveView(this.view);
     }
-    // Whether this tab rail shows the Quests dot: a change of Trackers redraws the window only when it changes (M2).
+    // The Quests dot, kept so a Trackers change redraws a window off the Quests tab only when the dot would change.
     this.questDot = !this.isGM && (qtab ? quests : questList()).some((q) => q.mark && q.id !== this.view.quest);
     const quest = qtab ? quests.find((q) => q.id === this.view.quest) ?? null : null;
     if (quest && !this.isGM && quest.mark) qapi.markQuestSeen(quest.id);
@@ -948,9 +954,9 @@ class JournalApp extends foundry.applications.api.ApplicationV2 {
     this.#restoring = true;
     try {
       const pending = super.maximize();
-      // Foundry's restore animation can stall at the header's height (seen on 14.370, core windows too), and it sets
-      // the size while that runs, so the window came back as a strip. Finish the animation at once; then let anything
-      // left end before putting the size back.
+      // Foundry's restore animation can stall at the header's height (seen on Foundry 14.370, core windows too) and
+      // it sets the size while that runs, which would leave the window a strip. Finish the animation at once, then
+      // let anything left end before putting the size back.
       for (const a of this.element.getAnimations?.() ?? []) {
         try {
           a.finish();
@@ -1522,7 +1528,7 @@ async function giveDialog(v) {
   }).then((r) => (r && typeof r === "object" ? r : null));
 }
 
-/** "Previously on…": a recap's short version, on every player's screen. */
+/** "Previously on…": a recap's short version, on the screens of the players who can read it (and the GM's). */
 class PreviouslyApp extends foundry.applications.api.ApplicationV2 {
   static DEFAULT_OPTIONS = {
     id: `${MOD}-previously`,
@@ -1571,8 +1577,9 @@ function sharedCopyOf(sourceId, userId) {
   }) ?? null;
 }
 
-/** A player asks the GM's client to do something they may not have the rights for. */
+/** Requests waiting for the GM's answer: request id to the timer that gives up after 10 s. */
 const pending = new Map();
+/** A player asks the GM's client to do something they may not have the rights for. False if no GM is logged in. */
 function askGM(msg, offline = "Campaign Journal: a GM needs to be logged in for that.") {
   if (!game.users.activeGM) {
     ui.notifications.warn(offline);
@@ -1684,7 +1691,7 @@ async function onRequest(msg, sender) {
     } else if (msg.type === "edit") {
       const entry = game.journal.get(msg.entry);
       const d = entry && describe(entry);
-      // The flag can be rewritten by anyone who may edit the entry; an Owner entry under the player's own name can't.
+      // Any editor can rewrite the author flag, so the sender must also hold Owner in their own right.
       if (!d || d.area !== "party" || !d.all || d.author !== sender.id || entry.ownership?.[sender.id] !== LEVEL.OWNER) return reply({ type: "fail", text: "Campaign Journal: only the player who wrote it, or the GM, can change who edits it." });
       await entry.update({ ownership: editOwnership(!!msg.on, sender.id) });
       reply({ type: "done", what: "edit", entry: entry.id, on: !!msg.on });
