@@ -38,7 +38,7 @@ https://github.com/Sir-Bayard/bayards-campaign-journal/releases/latest/download/
 
 Foundry's **Update** button then picks up each new release. You can also download `module.zip` from the [latest release](https://github.com/Sir-Bayard/bayards-campaign-journal/releases/latest) and unzip it into `Data/modules/bayards-campaign-journal`.
 
-Requires Foundry VTT 14 (verified on 14.369). It works with any game system.
+Requires Foundry VTT 14 (verified on 14.370). It works with any game system.
 
 ## Opening it
 

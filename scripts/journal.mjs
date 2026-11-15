@@ -20,6 +20,8 @@ const AREA_KIND = { party: "page", handouts: "handout", player: "journal" };
 /* ------------------------------------------------------------------ */
 
 const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+/** A notification as plain text: Foundry keeps markup in a message, and names in these come from players. */
+const notice = (type, text) => ui.notifications[type](esc(text));
 const stripTags = (html) => String(html ?? "").replace(/<[^>]*>/g, " ").replace(/&nbsp;/g, " ").replace(/\s+/g, " ").trim();
 
 /** An entry's kind from its area and its own flag: a recap only in the party journal, otherwise the area's kind. */
@@ -326,7 +328,7 @@ function dots(d) {
   if (!d.readers.length) return `<span class="bcj-all bcj-gmonly" data-tooltip="Only GMs can see this">GM</span>`;
   return d.readers.map((u) => {
     const w = who(u);
-    return `<span class="bcj-dot" style="--c:${esc(w.color)}" data-tooltip="${esc(w.name)} can see this">${esc(w.initial)}</span>`;
+    return `<span class="bcj-dot" style="--c:${esc(w.color)}" data-tooltip-text="${esc(w.name)} can see this">${esc(w.initial)}</span>`;
   }).join("");
 }
 
@@ -393,18 +395,42 @@ function recapHTML(r) {
   return `${r.short ? `<blockquote class="bcj-short">${md2html(r.short)}</blockquote>` : ""}${md2html(r.body)}`;
 }
 
-/** A text page's HTML without Foundry's GM secret blocks (section.secret), unless they may be kept: the page's
- * owners see them in the reading pane, but they never go into downloads, search or "Previously on…" for others. */
+/** A text page's HTML without Foundry's GM secret blocks (section.secret) the GM hasn't revealed, unless they may be
+ * kept: the page's owners see them in the reading pane, but they never go into downloads, search or "Previously on…"
+ * for others. */
 function visibleHTML(page, keepSecrets = page.isOwner) {
   const html = page.text?.content ?? "";
   if (keepSecrets || !/secret/i.test(html)) return html;
   const doc = new DOMParser().parseFromString(html, "text/html");
-  for (const el of doc.querySelectorAll("section.secret")) el.remove();
+  for (const el of doc.querySelectorAll("section.secret:not(.revealed)")) el.remove();
+  return doc.body.innerHTML;
+}
+
+/** HTML with any secret blocks left in it opened up into their contents, since Markdown would keep the tags. */
+function openSections(html) {
+  if (!/<section/i.test(html)) return html;
+  const doc = new DOMParser().parseFromString(html, "text/html");
+  for (const el of doc.querySelectorAll("section")) el.replaceWith(...el.childNodes);
+  return doc.body.innerHTML;
+}
+
+/** A text page's HTML with each GM secret block labeled, for the GM's copy of an export. */
+function markedSecretsHTML(page) {
+  const html = page.text?.content ?? "";
+  if (!/secret/i.test(html)) return html;
+  const doc = new DOMParser().parseFromString(html, "text/html");
+  for (const el of doc.querySelectorAll("section.secret")) {
+    const quote = doc.createElement("blockquote");
+    const label = doc.createElement("p");
+    label.innerHTML = `<strong>${el.classList.contains("revealed") ? "GM secret (revealed)" : "GM secret"}</strong>`;
+    quote.append(label, ...el.childNodes);
+    el.replaceWith(quote);
+  }
   return doc.body.innerHTML;
 }
 
 /** The short version of a recap as HTML: its short box, else its first quote, else its first paragraph. Never from
- * a secret block, so the GM's popup shows what the players see. */
+ * a secret block the GM hasn't revealed, so the GM's popup shows what the players see. */
 function shortOf(entry) {
   const page = entry.pages.contents.find((p) => p.type === "text");
   if (!page) return "";
@@ -525,7 +551,7 @@ function noticeNew(entry) {
   if (!d || freshness(d) !== "new") return;
   noticed.add(entry.id);
   const what = d.kind === "recap" ? "New recap" : d.kind === "handout" ? "A handout for you" : d.sharedBy ? `Shared by ${who(game.users.get(d.sharedBy)).name}` : d.author ? `New from ${who(game.users.get(d.author)).name}` : "New in the party journal";
-  ui.notifications.info(`Campaign Journal: ${what}: ${entry.name}`);
+  notice("info", `Campaign Journal: ${what}: ${entry.name}`);
 }
 
 /** The readable pages of an entry, as HTML. */
@@ -565,6 +591,10 @@ function textOf(entry) {
 /* ------------------------------------------------------------------ */
 
 const openApps = new Set();
+/** The journal window while it's open or opening; openApps fills only once a first draw ends. */
+let mainApp = null;
+/** A journal window's close still under way: a new one waits for it, so core never loses track of the new one. */
+let closing = null;
 let refreshTimer = null;
 /* Quests, from PF2e Campaign Trackers when it's installed and on (this module never needs it). */
 const TRACKERS = "pf2e-campaign-trackers";
@@ -572,7 +602,7 @@ const TRACKERS = "pf2e-campaign-trackers";
 function questApi() {
   const m = game.modules.get(TRACKERS);
   const api = m?.active ? m.api : null;
-  if (typeof api?.quests !== "function" || typeof api.questHTML !== "function") return null;
+  if (!["quests", "questHTML", "openQuest", "markQuestSeen"].every((k) => typeof api?.[k] === "function")) return null;
   if (game.user.isGM) return api;
   try {
     return game.settings.get(TRACKERS, "playerAccess") ? api : null;
@@ -784,23 +814,25 @@ class JournalApp extends foundry.applications.api.ApplicationV2 {
     saveView(this.view);
     this.texts = new Map(shown.map((d) => [d.id, textOf(d.entry)]));
     const current = shown.find((d) => d.id === this.view.entry) ?? null;
-    if (current && !this.isGM) markSeen(current.entry);
+    if (current && this.#inFront(`e:${current.id}`)) markSeen(current.entry);
     const qapi = qtab ? questApi() : null;
     const quests = qtab ? questList() : [];
     if (qtab && !quests.some((q) => q.id === this.view.quest)) {
       this.view.quest = (quests.find((q) => q.status === "active" && q.revealed) ?? quests.find((q) => q.revealed) ?? quests[0])?.id ?? null;
       saveView(this.view);
     }
+    // A quest's mark shows unless it's the one on show, and the one on show keeps it while held after a restore.
+    const showMark = (q) => !!q.mark && (q.id !== this.view.quest || this.held === `q:${q.id}`);
     // The Quests dot, kept so a Trackers change redraws a window off the Quests tab only when the dot would change.
-    this.questDot = !this.isGM && (qtab ? quests : questList()).some((q) => q.mark && q.id !== this.view.quest);
+    this.questDot = !this.isGM && (qtab ? quests : questList()).some(showMark);
     const quest = qtab ? quests.find((q) => q.id === this.view.quest) ?? null : null;
-    if (quest && !this.isGM && quest.mark) qapi.markQuestSeen(quest.id);
+    if (quest && quest.mark && this.#inFront(`q:${quest.id}`)) qapi.markQuestSeen(quest.id);
 
     const mark = (d) => {
       const f = freshness(d);
       return f ? `<b class="bcj-new bcj-${f}">${f === "new" ? "New" : "Updated"}</b>` : "";
     };
-    const unseenIn = (k) => !this.isGM && (k === "quests" ? (qtab ? quests : questList()).some((q) => q.mark && q.id !== this.view.quest) : this.groups(all, k).some(([, items]) => items.some((d) => freshness(d))));
+    const unseenIn = (k) => !this.isGM && (k === "quests" ? (qtab ? quests : questList()).some(showMark) : this.groups(all, k).some(([, items]) => items.some((d) => freshness(d))));
     const rail = tabs.map(([k, label, icon]) => `<a class="bcj-tab ${k === this.view.tab ? "active" : ""}" data-action="bcjTab" data-tab="${k}"><i class="${icon}"></i><span>${label}</span>${unseenIn(k) ? `<i class="bcj-dotnew" data-tooltip="Something new"></i>` : ""}</a>`).join("");
     const sorter = (key) => this.view.sorts[key] === "az"
       ? `<a class="bcj-sort" data-action="bcjSort" data-sort="${key}" data-tooltip="Show the newest first"><i class="fa-solid fa-clock"></i> Newest</a>`
@@ -839,7 +871,7 @@ class JournalApp extends foundry.applications.api.ApplicationV2 {
       const rows = items.map((q) => {
         const sub = [q.category, q.total ? `${q.done}/${q.total}` : ""].filter(Boolean).join(" · ");
         const icons = `${q.party ? `<i class="fa-solid fa-users" data-tooltip="A party quest"></i>` : ""}${q.focus ? `<i class="fa-solid fa-star" data-tooltip="The party's focus"></i>` : ""}`;
-        const mark = q.mark && q.id !== this.view.quest ? `<b class="bcj-new bcj-${q.mark}">${q.mark === "new" ? "New" : "Updated"}</b>` : "";
+        const mark = showMark(q) ? `<b class="bcj-new bcj-${q.mark}">${q.mark === "new" ? "New" : "Updated"}</b>` : "";
         return `<a class="bcj-item bcj-qitem bcj-qs-${esc(q.status)} ${q.revealed ? "" : "bcj-qhidden"} ${q.id === this.view.quest ? "active" : ""}" data-action="bcjQuest" data-quest="${esc(q.id)}" data-entry="quest:${esc(q.id)}" draggable="true">
           <span class="bcj-it">${q.revealed ? "" : `<i class="fa-solid fa-eye-slash" data-tooltip="Players can't see it yet"></i> `}${esc(q.name)}</span><span class="bcj-is">${mark}${esc(sub)}</span><span class="bcj-iw">${icons}</span></a>`;
       }).join("");
@@ -876,10 +908,10 @@ class JournalApp extends foundry.applications.api.ApplicationV2 {
     const att = d.kind === "recap" && d.attended.length
       ? `<div class="bcj-att"><span class="bcj-k">At the table</span>${d.attended.map((id) => game.users.get(id)).filter(Boolean).map((u) => {
         const w = who(u);
-        return `<span class="bcj-dot" style="--c:${esc(w.color)}" data-tooltip="${esc(w.name)}">${esc(w.initial)}</span>`;
+        return `<span class="bcj-dot" style="--c:${esc(w.color)}" data-tooltip-text="${esc(w.name)}">${esc(w.initial)}</span>`;
       }).join("")}</div>`
       : "";
-    const B = (action, icon, label, tip = "") => `<button type="button" data-action="${action}"${tip ? ` data-tooltip="${esc(tip)}"` : ""}><i class="${icon}"></i> ${label}</button>`;
+    const B = (action, icon, label, tip = "") => `<button type="button" data-action="${action}"${tip ? ` data-tooltip-text="${esc(tip)}"` : ""}><i class="${icon}"></i> ${label}</button>`;
     const gm = this.isGM;
     const mine = !gm && d.area === "player" && d.user === game.user.id && entry.isOwner;
     const copy = mine ? sharedCopyOf(entry.id, game.user.id) : null;
@@ -931,15 +963,29 @@ class JournalApp extends foundry.applications.api.ApplicationV2 {
 
   _onClose() {
     openApps.delete(this);
+    if (mainApp === this) mainApp = null;
   }
 
-  /* Foundry restores a minimized window to its measured size on screen, which is smaller than its real size when
-   * the interface is scaled; keep the real size from before and put it back. */
+  /** A window on its way out is never handed back by open(). */
+  close(options) {
+    if (mainApp !== this) return super.close(options);
+    mainApp = null;
+    const done = super.close(options).finally(() => {
+      if (closing === done) closing = null;
+    });
+    closing = done;
+    return done;
+  }
+
+  /** The size from before minimizing, put back after a restore (see #restoreWhole for why). */
   #beforeMin = null;
+  /** Minimized, kept here because Foundry's own `minimized` reads false while the window redraws. */
+  #collapsed = false;
   #restoring = false;
   #restore = null;
   async minimize() {
     if (!this.minimized && this.rendered) this.#beforeMin = { width: this.position.width, height: this.position.height };
+    if (this.rendered) this.#collapsed = true;
     return super.minimize();
   }
   maximize() {
@@ -965,6 +1011,9 @@ class JournalApp extends foundry.applications.api.ApplicationV2 {
         }
       }
       await pending;
+      // Hold what changed before the window counts as in front again, so no draw marks it in between.
+      if (!this.minimized) this.#holdIfChanged();
+      this.#collapsed = this.minimized;
       await settle(this.element);
       // Not if it was closed or minimized again meanwhile.
       if (was && this.rendered && !this.minimized) this.setPosition(was);
@@ -1014,12 +1063,13 @@ class JournalApp extends foundry.applications.api.ApplicationV2 {
       ev.preventDefault();
       if (go.dataset.pctAction === "pctQuestGo" && go.dataset.qid) {
         this.view.quest = go.dataset.qid;
+        this.held = null;
         this.render();
       } else if (go.dataset.pctAction === "pctOpenActor" && go.dataset.uuid) {
         const actor = await fromUuid(go.dataset.uuid);
-        if (!actor) ui.notifications.info("That's no longer in the world.");
-        else if (actor.testUserPermission(game.user, "LIMITED")) actor.sheet.render(true);
-        else ui.notifications.info("You can't open that yet.");
+        if (!actor) notice("info", "That's no longer in the world.");
+        else if (actor.testUserPermission(game.user, "LIMITED")) actor.sheet.render({ force: true });
+        else notice("info", "You can't open that yet.");
       }
     });
   }
@@ -1060,7 +1110,7 @@ class JournalApp extends foundry.applications.api.ApplicationV2 {
         dragged = null;
         clear();
         JournalEntry.updateDocuments(ids.map((id, i) => ({ _id: id, [`flags.${MOD}.pinOrder`]: i })))
-          .catch((err) => ui.notifications.warn(`Campaign Journal: couldn't save the order (${err.message}).`));
+          .catch((err) => notice("warn", `Campaign Journal: couldn't save the order (${err.message}).`));
       });
       a.addEventListener("dragend", () => {
         dragged = null;
@@ -1096,6 +1146,7 @@ class JournalApp extends foundry.applications.api.ApplicationV2 {
 
   static #onQuest(event, target) {
     this.view.quest = target.dataset.quest;
+    this.held = null;
     this.render();
   }
 
@@ -1109,32 +1160,54 @@ class JournalApp extends foundry.applications.api.ApplicationV2 {
     this.view.tab = "quests";
     this.view.quest = id;
     this.view.query = "";
+    this.held = null;
     this.render();
   }
 
   static #onTab(event, target) {
     this.view.tab = target.dataset.tab;
     this.view.entry = null;
+    this.held = null;
     this.render();
   }
 
   static #onEntry(event, target) {
     this.view.entry = target.dataset.entry;
+    this.held = null;
     this.render();
+  }
+
+  /** What a player picks counts as seen, and so does what a draw shows in an open window, except while minimized
+   * and, after a restore, what changed while it was minimized: that keeps its mark until the player picks something. */
+  held = null;
+  #inFront(key) {
+    return !this.isGM && !this.#collapsed && this.held !== key;
+  }
+  /** On a restore: hold the entry or quest on show if it changed while the window was minimized. */
+  #holdIfChanged() {
+    if (this.isGM) return;
+    if (this.view.tab === "quests") {
+      const q = this.view.quest && questApi() ? questList().find((x) => x.id === this.view.quest) : null;
+      if (q?.mark) this.held = `q:${q.id}`;
+      return;
+    }
+    const entry = this.view.entry && game.journal.get(this.view.entry);
+    const d = entry && describe(entry);
+    if (d && entry.testUserPermission(game.user, "OBSERVER") && freshness(d)) this.held = `e:${d.id}`;
   }
 
   static #onEdit() {
     const entry = game.journal.get(this.view.entry);
     if (!entry?.isOwner) return;
     const pages = entry.pages.contents;
-    if (pages.length === 1 && pages[0].type === "text") pages[0].sheet.render(true);
-    else entry.sheet.render(true);
+    if (pages.length === 1 && pages[0].type === "text") pages[0].sheet.render({ force: true });
+    else entry.sheet.render({ force: true });
   }
 
   static #onOpenPage(event, target) {
     const entry = game.journal.get(this.view.entry);
     const page = entry?.pages.get(target.dataset.page);
-    if (page) entry.sheet.render(true, { pageId: page.id });
+    if (page) entry.sheet.render({ force: true, pageId: page.id });
   }
 
   static #onToc(event, target) {
@@ -1155,7 +1228,7 @@ class JournalApp extends foundry.applications.api.ApplicationV2 {
   static async #onNewRecap() {
     if (!this.isGM) return;
     const party = findFolder("party");
-    if (!party) return ui.notifications.warn("Campaign Journal: the Party folder isn't there yet.");
+    if (!party) return notice("warn", "Campaign Journal: the Party folder isn't there yet.");
     const sessions = readable().filter((d) => d.kind === "recap").map((d) => Number(d.session) || 0);
     const data = await recapDialog({ session: (sessions.length ? Math.max(...sessions) : 0) + 1, date: today(), played: realDate(), attended: players().map((u) => u.id), share: true }, { create: true });
     if (!data) return;
@@ -1172,7 +1245,7 @@ class JournalApp extends foundry.applications.api.ApplicationV2 {
     this.view.tab = "party";
     this.view.entry = entry.id;
     this.render();
-    if (!data.md.trim()) entry.pages.contents[0]?.sheet.render(true);
+    if (!data.md.trim()) entry.pages.contents[0]?.sheet.render({ force: true });
   }
 
   static async #onDetails() {
@@ -1192,7 +1265,7 @@ class JournalApp extends foundry.applications.api.ApplicationV2 {
   static async #onNewPage() {
     if (!this.isGM) return;
     const party = findFolder("party");
-    if (!party) return ui.notifications.warn("Campaign Journal: the Party folder isn't there yet.");
+    if (!party) return notice("warn", "Campaign Journal: the Party folder isn't there yet.");
     const data = await DialogV2().wait({
       window: { title: "New page", icon: "fa-solid fa-file-lines" },
       classes: ["bcj-dialog"],
@@ -1220,13 +1293,13 @@ class JournalApp extends foundry.applications.api.ApplicationV2 {
     this.view.tab = "party";
     this.view.entry = entry.id;
     this.render();
-    entry.pages.contents[0]?.sheet.render(true);
+    entry.pages.contents[0]?.sheet.render({ force: true });
   }
 
   static async #onNewHandout() {
     if (!this.isGM) return;
     const folder = findFolder("handouts");
-    if (!folder) return ui.notifications.warn("Campaign Journal: the Handouts folder isn't there yet.");
+    if (!folder) return notice("warn", "Campaign Journal: the Handouts folder isn't there yet.");
     const data = await giveDialog({ title: "New handout", name: "", everyone: false, readers: [], letter: true });
     if (!data?.name) return;
     const entry = await JournalEntry.create({
@@ -1237,7 +1310,7 @@ class JournalApp extends foundry.applications.api.ApplicationV2 {
     this.view.tab = "handouts";
     this.view.entry = entry.id;
     this.render();
-    entry.pages.contents[0]?.sheet.render(true);
+    entry.pages.contents[0]?.sheet.render({ force: true });
   }
 
   static async #onGive() {
@@ -1252,7 +1325,7 @@ class JournalApp extends foundry.applications.api.ApplicationV2 {
   static async #onPin() {
     const entry = game.journal.get(this.view.entry);
     if (!this.isGM || !entry) return;
-    if (flagsOf(entry).pinned) return entry.update({ [`flags.${MOD}.pinned`]: false, [`flags.${MOD}.-=pinOrder`]: null });
+    if (flagsOf(entry).pinned) return entry.update({ [`flags.${MOD}.pinned`]: false, [`flags.${MOD}.pinOrder`]: new foundry.data.operators.ForcedDeletion() });
     const last = Math.max(-1, ...readable().filter((d) => d.pinned && Number.isFinite(d.pinOrder)).map((d) => d.pinOrder));
     await entry.update({ [`flags.${MOD}.pinned`]: true, [`flags.${MOD}.pinOrder`]: last + 1 });
   }
@@ -1261,35 +1334,42 @@ class JournalApp extends foundry.applications.api.ApplicationV2 {
     const entry = game.journal.get(this.view.entry);
     if (!this.isGM || !entry) return;
     const to = readersOf(entry.ownership, game.users.contents).readers.filter((u) => u.active);
-    if (!to.length) return ui.notifications.warn(`No player who can read "${entry.name}" is logged in.`);
+    if (!to.length) return notice("warn", `No player who can read "${entry.name}" is logged in.`);
     game.socket.emit(SOCKET, { type: "show", entry: entry.id, users: to.map((u) => u.id) });
-    ui.notifications.info(`Shown to ${to.map((u) => who(u).name).join(", ")}.`);
+    notice("info", `Shown to ${to.map((u) => who(u).name).join(", ")}.`);
   }
 
   static #onPrevious() {
     const entry = game.journal.get(this.view.entry);
     if (!this.isGM || !entry) return;
-    if (!shortOf(entry)) return ui.notifications.warn(`"${entry.name}" has no short version to show.`);
+    if (!shortOf(entry)) return notice("warn", `"${entry.name}" has no short version to show.`);
     const to = readersOf(entry.ownership, game.users.contents).readers.filter((u) => u.active);
     if (to.length) game.socket.emit(SOCKET, { type: "previously", entry: entry.id, users: to.map((u) => u.id) });
-    else ui.notifications.info(`No player who can read "${entry.name}" is logged in, so only you see it.`);
+    else notice("info", `No player who can read "${entry.name}" is logged in, so only you see it.`);
     PreviouslyApp.show(entry);
   }
 
-  static #onMarkdown() {
+  static async #onMarkdown() {
     const entry = game.journal.get(this.view.entry);
     const d = entry && describe(entry);
     if (!d) return;
-    foundry.utils.saveDataToFile(entryMarkdown(d), "text/markdown", `${slug(entry.name)}.md`);
+    const copy = await askCopy();
+    if (!copy) return;
+    if (copy === "pub" && !forPlayers(d)) return notice("warn", "No player can read this entry, so the players' copy would be empty.");
+    foundry.utils.saveDataToFile(entryMarkdown(d, 1, copy), "text/markdown", `${slug(entry.name)}${copy === "gm" ? "-gm" : ""}.md`);
   }
 
-  static #onExport() {
+  static async #onExport() {
     const seen = new Set();
-    const list = this.groups(readable()).flatMap(([, items]) => items).filter((d) => !seen.has(d.id) && seen.add(d.id));
-    if (!list.length) return ui.notifications.warn("Nothing on this tab to export.");
+    const all = this.groups(readable()).flatMap(([, items]) => items).filter((d) => !seen.has(d.id) && seen.add(d.id));
+    if (!all.length) return notice("warn", "Nothing on this tab to export.");
+    const copy = await askCopy(this.view.tab);
+    if (!copy) return;
+    const list = copy === "pub" ? all.filter(forPlayers) : all;
+    if (!list.length) return notice("warn", "No player can read anything on this tab, so the players' copy would be empty.");
     const label = this.tabs().find(([k]) => k === this.view.tab)?.[1] ?? "Journal";
-    const md = `# Campaign Journal: ${label}\n\n${list.map((d) => entryMarkdown(d, 2)).join("\n\n---\n\n")}\n`;
-    foundry.utils.saveDataToFile(md, "text/markdown", `campaign-journal-${slug(label)}.md`);
+    const md = `# Campaign Journal: ${label}${copy === "gm" ? " (GM copy)" : ""}\n\n${list.map((d) => entryMarkdown(d, 2, copy)).join("\n\n---\n\n")}\n`;
+    foundry.utils.saveDataToFile(md, "text/markdown", `campaign-journal-${slug(label)}${copy === "gm" ? "-gm" : ""}.md`);
   }
 
   static async #onNewEntry() {
@@ -1382,23 +1462,32 @@ class JournalApp extends foundry.applications.api.ApplicationV2 {
     try {
       await entry.delete();
     } catch (err) {
-      ui.notifications.warn(`Campaign Journal: couldn't delete "${entry.name}" (${err.message}).`);
+      notice("warn", `Campaign Journal: couldn't delete "${entry.name}" (${err.message}).`);
     }
   }
 
   /** Open the window, on an entry if one is given. */
   static open(entryId = null) {
-    const app = [...openApps][0] ?? new JournalApp();
+    if (!mainApp && closing) {
+      closing.then(() => JournalApp.open(entryId), () => JournalApp.open(entryId));
+      return null;
+    }
+    const app = mainApp ?? (mainApp = new JournalApp());
+    let picked = false;
     if (entryId) {
       const d = describe(game.journal.get(entryId) ?? {});
       if (d) {
+        picked = true;
         app.view.entry = entryId;
+        app.held = null;
         app.view.tab = d.area === "party" || (d.kind === "handout" && d.all) ? "party" : game.user.isGM ? (d.kind === "handout" ? "handouts" : "players") : "mine";
       }
     }
     // Restore a minimized window before drawing it: a draw that ends while it's still collapsed would take the
     // title bar's height as its size.
     if (app.minimized) app.maximize().then(() => {
+      // An entry opened by name is the player's pick, whatever changed while it was minimized.
+      if (picked) app.held = null;
       // Closed while it was being restored: don't open it again.
       if (app.rendered) app.render({ force: true });
     });
@@ -1410,17 +1499,47 @@ class JournalApp extends foundry.applications.api.ApplicationV2 {
 const players = () => game.users.filter((u) => !u.isGM).sort((a, b) => a.name.localeCompare(b.name));
 const DialogV2 = () => foundry.applications.api.DialogV2;
 
-/** One entry as Markdown: its title (at the given heading level), its line, then its readable text pages. */
-function entryMarkdown(d, level = 1) {
+/** Whether any player can read an entry, or a page of it (a page's own level, else the entry's). */
+const forPlayers = (d) => d.all || d.readers.length > 0;
+function pageForPlayers(page) {
+  const own = page.ownership?.default ?? -1;
+  const level = own === -1 ? page.parent?.ownership?.default ?? 0 : own;
+  return level >= CONST.DOCUMENT_OWNERSHIP_LEVELS.OBSERVER || players().some((u) => page.testUserPermission(u, "OBSERVER"));
+}
+
+/** The GM's choice of export: "pub" (what players can read, hidden secrets left out) or "gm" (everything, secret
+ * blocks labeled), or null if canceled. Players always get their own copy, so they aren't asked. */
+async function askCopy(tab = "party") {
+  if (!game.user.isGM) return "own";
+  const note = tab === "players" ? `<p class="bcj-dim">On this tab the players' copy holds every player's private journal.</p>`
+    : tab === "handouts" ? `<p class="bcj-dim">On this tab the players' copy holds handouts given to single players too.</p>` : "";
+  const pick = await DialogV2().wait({
+    window: { title: "Export as Markdown", icon: "fa-solid fa-file-export" },
+    classes: ["bcj-dialog"],
+    content: `<div class="bcj-form"><label class="bcj-check"><input type="radio" name="copy" value="pub" checked> Players' copy: what players can read, hidden secrets left out</label>
+      <label class="bcj-check"><input type="radio" name="copy" value="gm"> GM copy: everything, GM secrets marked</label>${note}</div>`,
+    buttons: [
+      { action: "export", label: "Export", icon: "fa-solid fa-file-export", default: true, callback: (ev, button) => button.form.elements.copy.value },
+      { action: "cancel", label: "Cancel" },
+    ],
+    rejectClose: false,
+  });
+  return pick === "pub" || pick === "gm" ? pick : null;
+}
+
+/** One entry as Markdown: its title (at the given heading level), its line, then its text pages for this copy
+ * ("own": what this user can read; "pub": what players can read; "gm": everything, secrets labeled). */
+function entryMarkdown(d, level = 1, copy = "own") {
   const entry = d.entry;
   const hashes = "#".repeat(level);
-  const pages = entry.pages.contents.filter((p) => p.type === "text" && p.testUserPermission(game.user, "OBSERVER")).sort((a, b) => a.sort - b.sort);
+  const pages = entry.pages.contents.filter((p) => p.type === "text" && p.testUserPermission(game.user, "OBSERVER") && (copy !== "pub" || pageForPlayers(p))).sort((a, b) => a.sort - b.sort);
   const parts = [`${hashes} ${entry.name}`, `*${metaline(d)}*`];
   for (const p of pages) {
     if (pages.length > 1) parts.push(`${hashes}# ${p.name}`);
     // The page's own headings go below the entry's title (and its page names, if it has several).
     const shift = level - 1 + (pages.length > 1 ? 1 : 0);
-    parts.push(shiftHeadings(html2md(visibleHTML(p)), shift));
+    const html = copy === "gm" ? markedSecretsHTML(p) : openSections(visibleHTML(p, copy === "pub" ? false : undefined));
+    parts.push(shiftHeadings(html2md(html), shift));
   }
   return parts.filter(Boolean).join("\n\n");
 }
@@ -1484,7 +1603,7 @@ async function recapDialog(v, { create }) {
         // An untouched field keeps the stored date, even if the calendar can't read its own text back.
         if (!create && v.date && typed === fmtDate(v.date)) date = v.date;
         else if (date === undefined) {
-          ui.notifications.warn(`Campaign Journal: "${typed}" isn't a date the calendar knows; ${create || !v.date ? "it was left out" : "the date was kept as it was"}.`);
+          notice("warn", `Campaign Journal: "${typed}" isn't a date the calendar knows; ${create || !v.date ? "it was left out" : "the date was kept as it was"}.`);
           date = create ? null : v.date ?? null;
         }
         return {
@@ -1561,9 +1680,14 @@ class PreviouslyApp extends foundry.applications.api.ApplicationV2 {
     this.close();
   }
 
+  /** One popup at a time: each show waits for the one before it, closes the old window, then opens its own. */
+  static #queue = Promise.resolve();
   static show(entry) {
-    foundry.applications.instances.get(`${MOD}-previously`)?.close({ animate: false });
-    new PreviouslyApp(entry).render({ force: true });
+    PreviouslyApp.#queue = PreviouslyApp.#queue.then(async () => {
+      await foundry.applications.instances.get(`${MOD}-previously`)?.close({ animate: false });
+      await new PreviouslyApp(entry).render({ force: true });
+    }).catch((err) => console.error(err));
+    return PreviouslyApp.#queue;
   }
 }
 
@@ -1582,13 +1706,13 @@ const pending = new Map();
 /** A player asks the GM's client to do something they may not have the rights for. False if no GM is logged in. */
 function askGM(msg, offline = "Campaign Journal: a GM needs to be logged in for that.") {
   if (!game.users.activeGM) {
-    ui.notifications.warn(offline);
+    notice("warn", offline);
     return false;
   }
   const rid = foundry.utils.randomID(12);
   pending.set(rid, setTimeout(() => {
     pending.delete(rid);
-    ui.notifications.warn("Campaign Journal: the GM's client didn't answer. Try again in a moment.");
+    notice("warn", "Campaign Journal: the GM's client didn't answer. Try again in a moment.");
   }, 10000));
   game.socket.emit(SOCKET, { ...msg, rid });
   return true;
@@ -1651,11 +1775,11 @@ async function shareCopy(user, sourceId) {
 function afterDone(what, entry) {
   if (what === "create") {
     JournalApp.open(entry.id);
-    entry.pages.contents[0]?.sheet.render(true);
+    entry.pages.contents[0]?.sheet.render({ force: true });
   } else if (what === "share") {
     noticed.add(entry.id);
     markSeen(entry);
-    ui.notifications.info(`Campaign Journal: "${entry.name}" is in the party journal.`);
+    notice("info", `Campaign Journal: "${entry.name}" is in the party journal.`);
   }
 }
 
@@ -1670,7 +1794,7 @@ async function playerDo(msg) {
       if (entry) afterDone(msg.type === "share" ? "share" : "create", entry);
       return;
     } catch (err) {
-      if (err instanceof Refused || !game.users.activeGM) return ui.notifications.warn(`Campaign Journal: ${err instanceof Refused ? err.message : `that didn't work (${err.message}).`}`);
+      if (err instanceof Refused || !game.users.activeGM) return notice("warn", `Campaign Journal: ${err instanceof Refused ? err.message : `that didn't work (${err.message}).`}`);
       console.warn(`${MOD} | couldn't do that here; asking the GM`, err);
     }
   }
@@ -1726,7 +1850,7 @@ function onSocket(msg, senderId) {
   if (Array.isArray(msg.users) && !msg.users.includes(game.user.id)) return;
   if (msg.type === "gmtab" || msg.type === "gmbye") return;
   if (msg.type === "done" || msg.type === "fail") answered(msg.rid);
-  if (msg.type === "fail") return ui.notifications.warn(String(msg.text ?? "Campaign Journal: that didn't work."));
+  if (msg.type === "fail") return notice("warn", String(msg.text ?? "Campaign Journal: that didn't work."));
   const act = () => {
     const entry = game.journal.get(msg.entry);
     if (!entry?.testUserPermission(game.user, "OBSERVER")) return false;
@@ -1734,7 +1858,7 @@ function onSocket(msg, senderId) {
     else if (msg.type === "previously") PreviouslyApp.show(entry);
     else if (msg.type === "done" && (msg.what === "create" || msg.what === "share")) afterDone(msg.what, entry);
     else if (msg.type === "done" && msg.what === "edit") {
-      ui.notifications.info(msg.on ? `Campaign Journal: the party can edit "${entry.name}" now.` : `Campaign Journal: only you and the GM can edit "${entry.name}" now.`);
+      notice("info", msg.on ? `Campaign Journal: the party can edit "${entry.name}" now.` : `Campaign Journal: only you and the GM can edit "${entry.name}" now.`);
     }
     return true;
   };

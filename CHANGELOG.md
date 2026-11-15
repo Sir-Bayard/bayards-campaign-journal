@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.2.1
+
+- Titles and names that players write show as plain text in notifications and tooltips, instead of as formatting or images.
+- An entry that changes while the journal window is minimized now shows Updated when you bring the window back, until you pick an entry. Before, it was quietly marked as read.
+- Opening the journal twice in quick succession (the J key, the Journal tab button, or a GM's Show to players) no longer opens two windows.
+- Secret blocks the GM has revealed now show in players' search, Markdown, Export and "Previously on…", as they do on the page.
+- The GM's Markdown and Export ask each time for the players' copy (what players can read, with hidden secrets left out) or the GM copy (everything, with each secret block marked).
+- "Previously on…" opens once when clicked on two recaps in quick succession.
+- The Quests tab shows only when the installed PF2e Campaign Trackers has everything the tab uses.
+
 ## 0.2.0
 
 - A Quests tab, when PF2e Campaign Trackers is installed: the quests the party knows, by status (Active, Leads, Completed, Failed), with each one's category, progress, New and Updated marks, and party-quest and focus icons. Click one to read it in the journal as the players see it; Open in Trackers ticks objectives, adds notes or edits it. The GM sees quests players can't yet, marked. Without Trackers (or when players can't open it) there's no Quests tab.
