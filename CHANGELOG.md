@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.3.0
+
+- **Keyboard.** The whole window works from the keyboard: tabs, the list, folds, sort toggles and every button take focus, Enter and Space work them, focus stays put when the window redraws, and the window's keys no longer reach Foundry's own (Space doesn't pause the game). Pinned entries move with **Move up** and **Move down** as well as by dragging; a quest's link can be copied with **Copy link**.
+- **What arrived while you were away.** The Campaign Journal button in the Journal tab shows how many entries are new or updated for you, and a player logging in gets one notice when something is waiting. New and Updated marks now follow you to any browser.
+- **Marks for the GM.** New and Updated show the GM what players have written: their journals, and party entries a player wrote or shared.
+- **Write here.** A one-page entry can be written in the journal window itself; Done saves, and so does moving to another entry, making a new one or closing the window. If a save fails, the text is kept, and Write here brings it back.
+- **Picture handouts.** New handout starts from a letter, a blank page or a picture.
+- **Search shows where it matched**: a line under each entry whose text matched, and the words marked on the page.
+- **Previous session and Next session** under a recap's title.
+- **Groups for Party subfolders.** A folder inside Party (an arc, say) shows as a group of its own in the party journal.
+- **A tidier toolbar.** Previously on…, Show to players and Edit stay in the row; Details, Give to…, Pin, Hide, Let the party edit and Markdown are under **More**; Delete sits apart. Delete now says whose journal an entry is in.
+- The line under each entry says when it was written or last changed, instead of repeating its group's name. The sort toggle shows the order the list is in (Newest or A-Z) with a swap icon. Empty lists say how to start.
+- Links in a Markdown export come out as their names, and pictures as pictures.
+- The window no longer redraws for entries you can't read, and a redraw keeps the page you're reading as it is (a playing video, a selection) when it hasn't changed. Search reads entries' text only when you search.
+- Foundry's Hide button no longer shows on a revealed secret block for players who can't edit the page.
+- Every word the module shows is in `lang/en.json`, ready for translation.
+- The window's size and place are now kept per world and user. One GM in two browser tabs is handled more reliably (a tab that closes hands over at once).
+- For macro writers: `api.open()` now returns a promise of the window.
+
 ## 0.2.1
 
 - Titles and names that players write show as plain text in notifications and tooltips, instead of as formatting or images.

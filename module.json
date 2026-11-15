@@ -2,7 +2,7 @@
   "id": "bayards-campaign-journal",
   "title": "Bayard's Campaign Journal",
   "description": "A journal window for the party: session recaps and standing pages, handouts for one player or several, and each player's private journal, all kept as ordinary journal entries.",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "compatibility": {
     "minimum": "14",
     "verified": "14.370",
@@ -16,7 +16,7 @@
   ],
   "esmodules": ["scripts/journal.mjs"],
   "styles": ["styles/journal.css"],
-  "languages": [],
+  "languages": [{ "lang": "en", "name": "English", "path": "lang/en.json" }],
   "socket": true,
   "url": "https://github.com/Sir-Bayard/bayards-campaign-journal",
   "manifest": "https://github.com/Sir-Bayard/bayards-campaign-journal/releases/latest/download/module.json",

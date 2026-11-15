@@ -18,8 +18,8 @@
 
 /* Rail */
 .bcj .bcj-rail { display: flex; flex-direction: column; gap: 2px; padding: 10px 6px; background: rgba(0, 0, 0, 0.25); border-right: 1px solid var(--bcj-line); }
-.bcj .bcj-tab, .bcj .bcj-railfoot a { display: flex; align-items: center; gap: 8px; padding: 7px 10px; border-radius: 4px; cursor: pointer; color: inherit; }
-.bcj .bcj-tab:hover, .bcj .bcj-railfoot a:hover { background: rgba(255, 255, 255, 0.05); text-shadow: none; }
+.bcj .bcj-tab, .bcj .bcj-railfoot button { display: flex; width: 100%; text-align: left; background: none; border: none; font: inherit; line-height: inherit; height: auto; align-items: center; gap: 8px; padding: 7px 10px; border-radius: 4px; cursor: pointer; color: inherit; }
+.bcj .bcj-tab:hover, .bcj .bcj-railfoot button:hover { background: rgba(255, 255, 255, 0.05); text-shadow: none; }
 .bcj .bcj-tab.active { background: rgba(201, 164, 92, 0.16); box-shadow: inset 3px 0 0 var(--bcj-gold); }
 .bcj .bcj-railfoot { margin-top: auto; display: flex; flex-direction: column; gap: 2px; }
 
@@ -31,15 +31,16 @@
 .bcj .bcj-actions button { flex: 1 1 0; min-width: 0; font-size: 12px; height: 28px; padding: 0 4px; white-space: nowrap; gap: 4px; }
 .bcj .bcj-scroll { overflow-y: auto; padding: 0 6px 10px; min-height: 0; flex: 1; }
 .bcj .bcj-gh { display: flex; align-items: center; justify-content: space-between; gap: 6px; font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase; padding: 10px 6px 4px; opacity: 0.7; }
-.bcj .bcj-gh .bcj-sort { text-transform: none; letter-spacing: 0; cursor: pointer; white-space: nowrap; }
+.bcj .bcj-gh .bcj-sort { flex: none; width: auto; height: auto; padding: 0 2px; background: none; border: none; font: inherit; line-height: inherit; color: inherit; text-transform: none; letter-spacing: 0; cursor: pointer; white-space: nowrap; }
 .bcj .bcj-gh .bcj-sort:hover { color: var(--bcj-gold); text-shadow: none; }
-.bcj .bcj-gh .bcj-fold { display: flex; align-items: center; gap: 5px; cursor: pointer; color: inherit; min-width: 0; }
+.bcj .bcj-gh .bcj-fold { flex: 0 1 auto; width: auto; height: auto; padding: 0; background: none; border: none; font: inherit; line-height: inherit; letter-spacing: inherit; text-transform: inherit; text-align: left; display: flex; align-items: center; gap: 5px; cursor: pointer; color: inherit; min-width: 0; }
 .bcj .bcj-gh .bcj-fold:hover { color: var(--bcj-gold); text-shadow: none; }
 .bcj .bcj-gh .bcj-fold i { font-size: 8px; width: 8px; }
 .bcj .bcj-gh .bcj-count { letter-spacing: 0; padding: 0 5px; border-radius: 8px; background: rgba(255, 255, 255, 0.1); }
 .bcj .bcj-scroll:not(.bcj-searching) .bcj-folded > :not(.bcj-gh) { display: none; }
+.bcj .bcj-gitems { display: flex; flex-direction: column; }
 .bcj .bcj-listbar { border-bottom: 1px solid var(--bcj-line); padding-bottom: 6px; margin-bottom: 2px; }
-.bcj .bcj-item { display: grid; grid-template-columns: 1fr auto; column-gap: 6px; padding: 6px 8px; border-radius: 4px; cursor: pointer; color: inherit; }
+.bcj .bcj-item { width: 100%; height: auto; margin: 0; border: none; background: none; font: inherit; line-height: inherit; text-align: left; display: grid; grid-template-columns: 1fr auto; column-gap: 6px; padding: 6px 8px; border-radius: 4px; cursor: pointer; color: inherit; }
 .bcj .bcj-item:hover { background: rgba(255, 255, 255, 0.05); text-shadow: none; }
 .bcj .bcj-item.active { background: rgba(201, 164, 92, 0.14); box-shadow: inset 3px 0 0 var(--bcj-gold); }
 .bcj .bcj-item[draggable="true"] { cursor: grab; }
@@ -70,12 +71,21 @@
 .bcj .bcj-seen .bcj-k { flex-basis: 100%; text-align: right; margin: 0 0 2px; }
 .bcj .bcj-tools { display: flex; flex-wrap: wrap; gap: 6px; margin: 12px 0 14px; }
 .bcj .bcj-tools button { flex: none; width: auto; height: 26px; font-size: 12px; padding: 0 10px; background: var(--bcj-paper-2); border: 1px solid rgba(42, 36, 28, 0.25); color: var(--bcj-ink); }
-.bcj .bcj-tools .bcj-edit { margin-left: auto; }
+.bcj .bcj-tools .bcj-delete { margin-left: auto; color: #8a2a1e; }
+.bcj .bcj-tools .bcj-more { position: relative; flex: none; }
+.bcj .bcj-tools .bcj-more > summary { list-style: none; display: flex; align-items: center; gap: 5px; height: 26px; font-size: 12px; padding: 0 10px; border-radius: 3px; cursor: pointer; background: var(--bcj-paper-2); border: 1px solid rgba(42, 36, 28, 0.25); color: var(--bcj-ink); }
+.bcj .bcj-tools .bcj-more > summary::-webkit-details-marker { display: none; }
+.bcj .bcj-tools .bcj-more[open] > summary { box-shadow: inset 0 0 0 1px rgba(42, 36, 28, 0.35); }
+.bcj .bcj-tools .bcj-menu { position: absolute; z-index: 5; top: 30px; left: 0; display: flex; flex-direction: column; gap: 2px; min-width: 190px; padding: 4px; border-radius: 4px; background: var(--bcj-paper); border: 1px solid rgba(42, 36, 28, 0.3); box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35); }
+.bcj .bcj-tools .bcj-menu button { width: 100%; justify-content: flex-start; text-align: left; background: none; border: none; }
+.bcj .bcj-tools .bcj-menu button:hover { background: var(--bcj-paper-2); }
+.bcj .bcj-steps { display: flex; justify-content: space-between; gap: 8px; margin-top: 6px; }
+.bcj .bcj-steps .bcj-stepbtn { flex: none; width: auto; height: 22px; font-size: 11px; padding: 0 8px; background: none; border: 1px solid rgba(42, 36, 28, 0.25); color: var(--bcj-ink); }
 .bcj .bcj-flow { display: flex; gap: 22px; align-items: flex-start; margin-top: 12px; }
 .bcj .bcj-toc { order: 2; flex: none; width: 160px; position: sticky; top: 0; display: flex; flex-direction: column; gap: 4px; padding: 8px 10px; border-radius: 4px; font-size: 12px; background: var(--bcj-paper-2); }
 .bcj .bcj-toc[hidden] { display: none; }
-.bcj .bcj-toc a { cursor: pointer; color: var(--bcj-ink); }
-.bcj .bcj-toc a:hover { color: var(--bcj-red); text-shadow: none; }
+.bcj .bcj-toc .bcj-tocitem { width: auto; height: auto; padding: 0; margin: 0; border: none; background: none; font: inherit; line-height: inherit; text-align: left; cursor: pointer; color: var(--bcj-ink); }
+.bcj .bcj-toc .bcj-tocitem:hover { color: var(--bcj-red); text-shadow: none; }
 .bcj .bcj-toc .bcj-toc-h3 { padding-left: 10px; }
 .bcj .bcj-hint { font-family: "Signika", sans-serif; font-size: 13px; font-style: italic; opacity: 0.75; }
 .bcj .bcj-blank { display: grid; place-items: center; text-align: center; }
@@ -148,6 +158,8 @@
 .bcj .bcj-new { font-size: 9px; letter-spacing: 0.06em; text-transform: uppercase; padding: 0 4px; margin-right: 5px; border-radius: 3px; background: var(--bcj-gold); color: #1b1408; font-weight: 700; }
 .bcj .bcj-new.bcj-updated { background: rgba(201, 164, 92, 0.35); color: #f1e6cc; }
 .bcj .bcj-tab { position: relative; }
+.bcj .bcj-tabs { display: contents; }
+.bcj .bcj-sr { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
 .bcj .bcj-dotnew { margin-left: auto; width: 7px; height: 7px; border-radius: 50%; background: var(--bcj-gold); }
 .bcj .bcj-shared { margin: -6px 0 10px; font-family: "Signika", sans-serif; font-size: 12px; opacity: 0.75; }
 
@@ -163,3 +175,24 @@
 .bcj .bcj-quest .bcj-qtext { font-family: inherit; font-size: 15px; line-height: 1.45; }
 .bcj .bcj-quest .bcj-qtext .pct-app.pct-embed .pct { font-size: 15px; }
 .bcj .bcj-text a.pct-quest-link { font-family: inherit; font-size: 0.9em; }
+/* Foundry draws a Hide button on a revealed secret block for every reader; only those who can edit the page can use it. */
+.bcj .bcj-readonly .secret .reveal { display: none; }
+/* The count of new and updated entries on the Journal tab's button. */
+.bcj-open .bcj-open-count { margin-left: 4px; padding: 0 6px; border-radius: 8px; font-size: 11px; background: #c9a45c; color: #1b1712; }
+.bcj-open .bcj-open-count[hidden] { display: none; }
+.bcj-dialog .bcj-pic { margin-top: 4px; }
+.bcj-dialog .bcj-browse { flex: none; width: 30px; height: 26px; }
+/* Search: where an entry's text matched, and the words in the reading pane. */
+.bcj .bcj-item .bcj-snip { grid-column: 1 / -1; font-size: 11px; opacity: 0.8; line-height: 1.3; white-space: normal; }
+.bcj mark.bcj-hit { background: rgba(201, 164, 92, 0.45); color: inherit; padding: 0 1px; border-radius: 2px; }
+/* Writing in the window: Foundry's editor on the page. */
+.bcj .bcj-writing { flex: 1; min-width: 0; }
+.bcj .bcj-writing prose-mirror { display: flex; flex-direction: column; min-height: 320px; height: 100%; background: rgba(255, 255, 255, 0.35); border: 1px solid rgba(42, 36, 28, 0.25); border-radius: 4px; }
+/* Foundry outlines an active or mouse-focused button; the window's own tabs, rows and links show their state their own
+ * way and keep the keyboard focus ring (:focus-visible). */
+.bcj :is(.bcj-tab, .bcj-item, .bcj-fold, .bcj-sort, .bcj-tocitem, .bcj-stepbtn, .bcj-railfoot button):not(:focus-visible) { outline: none; }
+.bcj :is(.bcj-item, .bcj-fold, .bcj-sort, .bcj-tocitem, .bcj-railfoot button):focus:not(:focus-visible) { box-shadow: none; }
+.bcj .bcj-tab:focus:not(:focus-visible):not(.active) { box-shadow: none; }
+.bcj .bcj-tab.active:focus:not(:focus-visible) { box-shadow: inset 3px 0 0 var(--bcj-gold); }
+.bcj .bcj-toc .bcj-tocitem { display: block; }
+.bcj .bcj-linkbtn { display: inline; width: auto; height: auto; padding: 0; border: none; background: none; font: inherit; color: var(--bcj-red); text-decoration: underline; cursor: pointer; }
