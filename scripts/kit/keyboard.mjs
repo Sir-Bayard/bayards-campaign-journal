@@ -1,4 +1,4 @@
-/* Sir Bayard's module kit: keyboard 2. Copied unchanged into each module that uses it; edit the kit's source, not
+/* Sir Bayard's module kit: keyboard 3. Copied unchanged into each module that uses it; edit the kit's source, not
  * this copy. */
 
 /*
@@ -11,8 +11,8 @@
  * - A toggle carries aria-pressed and keeps the same label in both states. A fold is a <details>, or a button with
  *   aria-expanded (and aria-controls naming what it opens).
  * - Tabs are buttons with role="tab", aria-selected and aria-controls, inside role="tablist"; the panel has
- *   role="tabpanel" and aria-labelledby. Each tab is its own Tab stop (on purpose: simpler than arrow keys between
- *   tabs). Buttons that only filter a list, with no panel, are aria-pressed toggles instead.
+ *   role="tabpanel" and aria-labelledby. Each tab is its own Tab stop, and the arrow keys (Home, End) also move
+ *   along the tablist. Buttons that only filter a list, with no panel, are aria-pressed toggles instead.
  * - Something that must be dragged may stay an element with role="button" and tabindex="0" (Firefox drags buttons
  *   badly); Enter and Space work it like a click. It must not hold other controls. Every drag also has a way to do the
  *   same from the keyboard (a button or a menu: Move to group, File under, Move up).
@@ -227,7 +227,7 @@ export function restoreFocus(root, state, { retry = null, userMoved = false } = 
     const el = all(root, `[data-keep-scroll="${esc(k)}"]`)[i];
     if (el) Object.assign(el, { scrollTop: top, scrollLeft: left });
   }
-  // The window keys' mark moves to the redrawn element (not the window itself, which never takes keys but Tab).
+  // The window keys' mark moves to the redrawn element (not the window itself: it takes the mark on its next key).
   const mark = (x) => {
     if (state.kitKeys && x?.dataset && x !== root && x.dataset.keyboardFocus === undefined) {
       x.dataset.keyboardFocus = "true";
@@ -292,8 +292,25 @@ const WINDOW_KEYS = new Set(["Enter", " ", "ArrowUp", "ArrowDown", "ArrowLeft", 
 const listening = new WeakSet();
 /** Roots whose window has the ownKeys option on. */
 const owning = new WeakSet();
-/** Keys that stay Foundry's even in an ownKeys window: Escape (close the window) and the function keys. */
-const FOUNDRY_KEYS = (key) => key === "Escape" || /^F\d+$/.test(key);
+/** Ctrl (or Cmd) with these is the window's own editing (copy, paste, select all, undo), not Foundry's canvas copy or undo. */
+const EDIT_KEYS = new Set(["a", "c", "v", "x", "y", "z"]);
+/**
+ * Keys that stay Foundry's even in an ownKeys window: Escape (close the window), the function keys, the digits (the
+ * hotbar's macros), Alt (highlight) and Ctrl or Cmd combinations other than editing ones (other modules' hotkeys), and
+ * whatever push-to-talk is bound to.
+ */
+function foundryKey(ev) {
+  if (ev.key === "Escape" || /^F\d+$/.test(ev.key)) return true;
+  if (ev.ctrlKey || ev.metaKey) return !EDIT_KEYS.has(String(ev.key).toLowerCase());
+  if (/^Digit\d$/.test(ev.code) || ev.altKey || ev.key === "Alt") return true;
+  try {
+    return (globalThis.game?.keybindings?.get("core", "pushToTalk") ?? []).some((b) => b?.key === ev.code);
+  } catch {
+    return false;
+  }
+}
+/** A window minimized to its title bar has no keys of its own (focus may still sit on its header). */
+const collapsed = (root) => root.classList?.contains("minimized");
 /** Per page: a count of pointer presses and Tab presses, which move focus (see keyboardWindow's render). */
 const moves = new WeakMap();
 
@@ -322,7 +339,7 @@ export function windowKeys(root, { ownKeys = false } = {}) {
    */
   const ours = (el, ev) => {
     // (with modifiers too: Ctrl+C copies the window's text, not the selected tokens)
-    if (owning.has(root)) return !FOUNDRY_KEYS(ev.key);
+    if (owning.has(root)) return !foundryKey(ev) && !collapsed(root);
     if (ev.altKey || ev.ctrlKey || ev.metaKey) return false;
     if (ev.key === "Tab") return true;
     if (ev.shiftKey || !WINDOW_KEYS.has(ev.key) || el === root) return false;
@@ -364,14 +381,30 @@ export function windowKeys(root, { ownKeys = false } = {}) {
     if (ev.defaultPrevented || ev.altKey || ev.ctrlKey || ev.metaKey) return;
     const el = ev.target;
     if (!el || !(el === root || root.contains(el))) return;
-    if (ev.key === "Tab" && owning.has(root)) wrapTab(root, el, ev);
+    if (ev.key === "Tab" && owning.has(root) && !collapsed(root)) wrapTab(root, el, ev);
     else if (TAB_KEYS.has(ev.key) && !ev.shiftKey && el.matches?.('[role="tab"]') && el.dataset?.keyboardFocus !== undefined) stepTab(el, ev);
   });
 }
 
 /** What Tab stops on: enabled controls taking focus in Tab order (no positive tabindex in our windows), shown. */
-const TABBABLE = 'button, a[href], input:not([type="hidden"]), select, textarea, summary, [tabindex], [contenteditable="true"]';
-const tabbable = (el) => canFocus(el) && el.tabIndex >= 0 && el.getClientRects().length > 0 && getComputedStyle(el).visibility !== "hidden";
+const TABBABLE = 'button, a[href], input:not([type="hidden"]), select, textarea, summary, [tabindex], audio[controls], video[controls], iframe, [contenteditable]:not([contenteditable="false"])';
+/**
+ * Whether the browser's Tab would stop on `el`, as near as the kit can tell (a stop it counts that the browser skips
+ * would let Tab drop out of the window). Chrome reports sizes for the contents of a closed <details>, so those are
+ * left out by hand; so is every radio of a group but the checked one (or the first, when none is).
+ */
+function tabbable(el) {
+  if (!canFocus(el) || el.matches(":disabled") || el.tabIndex < 0 || !el.getClientRects().length || getComputedStyle(el).visibility === "hidden") return false;
+  const closed = el.closest("details:not([open])");
+  if (closed && el !== closed.querySelector(":scope > summary")) return false;
+  if (el.matches('input[type="radio"]') && el.name) {
+    const scope = el.form ?? el.getRootNode();
+    const group = [...scope.querySelectorAll(`input[type="radio"][name="${esc(el.name)}"]`)].filter((r) => !r.disabled);
+    const checked = group.find((r) => r.checked);
+    return el === (checked ?? group[0]);
+  }
+  return true;
+}
 /**
  * ownKeys: Tab past the window's last control comes back to its first (Shift+Tab the other way), so focus never drops
  * out to the map, where Tab cycles tokens. Escape and a click outside still leave.
@@ -427,7 +460,8 @@ export function focusStyle(module, scope, doc = globalThis.document) {
   outline: 2px solid var(--button-focus-outline-color, var(--input-focus-outline-color, #b5563b));
   outline-offset: -2px;
 }
-:is(${scope})[tabindex="-1"]:focus, :is(${scope}) [data-focus-pane]:focus { outline: none; }`;
+:is(${scope})[tabindex="-1"]:focus, :is(${scope}) [data-focus-pane]:focus { outline: none; }
+:is(${scope}) [data-focus-pane]:focus-visible { outline: 1px dashed var(--button-focus-outline-color, var(--input-focus-outline-color, #b5563b)); outline-offset: -3px; }`;
   doc.head.append(style);
 }
 
@@ -514,18 +548,23 @@ export function keyboardWindow(Base, { module, scope, ownKeys = false } = {}) {
       this.#clicksOn = root;
       if (!root.hasAttribute("tabindex")) root.tabIndex = -1;
       root.addEventListener("click", (ev) => {
-        this.#clicked = { pane: ev.target?.closest?.("[data-focus-pane]")?.dataset.focusPane ?? null, at: Date.now() };
+        // (with the page's count of mouse presses and Tabs, this click's included: any later one cancels the refocus)
+        this.#clicked = { pane: ev.target?.closest?.("[data-focus-pane]")?.dataset.focusPane ?? null, at: Date.now(), moves: moves.get(docOf(root)) };
         // After the click's own handlers and PF2e's blur; a redraw the click starts tries again when it's done.
         setTimeout(() => this.#focusIfLost(), 0);
       });
     }
 
-    /** After a click in the window (within 3 s): if focus fell out of it onto the page, put it on the pane clicked. */
+    /**
+     * After a click in the window (within 3 s, and nothing pressed or Tabbed since anywhere in the page): if focus fell
+     * out of it onto the page, put it on the pane clicked. A click on the map after it means the user left.
+     */
     #focusIfLost() {
       const want = this.#clicked;
       const root = this.element;
       if (!want || Date.now() - want.at > 3000 || !root?.isConnected) return;
       const doc = docOf(root);
+      if (moves.get(doc) !== want.moves) return;
       const active = doc.activeElement;
       // Focus in the window, or taken on purpose by something else (a dialog, the chat box): leave it.
       if (active && active !== doc.body && active !== doc.documentElement) return;
@@ -539,11 +578,11 @@ export function keyboardWindow(Base, { module, scope, ownKeys = false } = {}) {
      */
     focusWindow(pane = null) {
       const root = this.element;
-      if (!root?.isConnected || this.minimized) return false;
-      const target = (pane ? all(root, `[data-focus-pane="${esc(pane)}"]`)[0] : null) ?? root.querySelector("[data-focus-start]") ?? root.querySelector("[data-focus-pane]") ?? root;
-      if (target === root && !root.hasAttribute("tabindex")) root.tabIndex = -1;
-      target.focus({ preventScroll: true });
-      return docOf(root).activeElement === target;
+      if (!root?.isConnected || this.minimized || collapsed(root)) return false;
+      if (!root.hasAttribute("tabindex")) root.tabIndex = -1;
+      // The first that takes focus (a pane in a hidden tab doesn't), ending with the window itself.
+      const tries = [...(pane ? all(root, `[data-focus-pane="${esc(pane)}"]`) : []), ...all(root, "[data-focus-start]"), ...all(root, "[data-focus-pane]"), root];
+      return tries.some((el) => tryFocus(el));
     }
 
     /** Say something to screen readers (see announce). */

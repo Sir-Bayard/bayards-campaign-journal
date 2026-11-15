@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.2
+
+- **Keys the journal has no use for reach Foundry again**: the number keys (hotbar macros), Alt, push-to-talk and other modules' Ctrl shortcuts. Ctrl+C, Ctrl+V, Ctrl+A and Ctrl+Z still belong to the journal, so they copy and undo text, not tokens.
+- **Clicking the map gives the keys back for good.** In 0.3.1, if the journal redrew within a few seconds of a click in it (a player's change, a pin), focus could jump back into the journal after you had clicked the map.
+- **A minimized journal gives the keys back.**
+- **Tab no longer slips out** past the More menu when it's the last button on the page.
+- When focus comes into the journal by keyboard (J, the button), a faint dashed outline shows which pane has it.
+
 ## 0.3.1
 
 - **Keys stay with the journal while you work in it.** Once you've clicked in the window, or opened it with J or the button, Space doesn't pause the game, the arrows and letters don't move the map, and Tab moves through the window instead of jumping between tokens. In 0.3.0 that only held after reaching the window with Tab, so with the mouse (and PF2e, which takes focus off a clicked button) Foundry still got every key. Click the map to give the keys back; Escape still closes the window.
