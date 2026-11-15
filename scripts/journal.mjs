@@ -1362,7 +1362,7 @@ class JournalApp extends foundry.applications.api.ApplicationV2 {
     const entry = game.journal.get(this.view.entry);
     const d = entry && describe(entry);
     if (!d) return;
-    const copy = await askCopy();
+    const copy = await askCopy("entry");
     if (!copy) return;
     if (copy === "pub" && !forPlayers(d)) return notice("warn", "No player can read this entry, so the players' copy would be empty.");
     foundry.utils.saveDataToFile(entryMarkdown(d, 1, copy), "text/markdown", `${slug(entry.name)}${copy === "gm" ? "-gm" : ""}.md`);
@@ -1372,10 +1372,13 @@ class JournalApp extends foundry.applications.api.ApplicationV2 {
     const seen = new Set();
     const all = this.groups(readable()).flatMap(([, items]) => items).filter((d) => !seen.has(d.id) && seen.add(d.id));
     if (!all.length) return notice("warn", "Nothing on this tab to export.");
-    const copy = await askCopy(this.view.tab);
-    if (!copy) return;
-    const list = copy === "pub" ? all.filter(forPlayers) : all;
-    if (!list.length) return notice("warn", "No player can read anything on this tab, so the players' copy would be empty.");
+    // A tab's players' copy is for sharing with the table, so it holds only what every player can read; players'
+    // own journals are private, so the GM's Players tab exports the GM copy without asking.
+    const picked = this.isGM && this.view.tab === "players" ? "gm" : await askCopy("tab");
+    if (!picked) return;
+    const copy = picked === "pub" ? "table" : picked;
+    const list = copy === "table" ? all.filter(forEveryone) : all;
+    if (!list.length) return notice("warn", "Nothing on this tab is shared with every player, so the players' copy would be empty.");
     const label = this.tabs().find(([k]) => k === this.view.tab)?.[1] ?? "Journal";
     const md = `# Campaign Journal: ${label}${copy === "gm" ? " (GM copy)" : ""}\n\n${list.map((d) => entryMarkdown(d, 2, copy)).join("\n\n---\n\n")}\n`;
     foundry.utils.saveDataToFile(md, "text/markdown", `campaign-journal-${slug(label)}${copy === "gm" ? "-gm" : ""}.md`);
@@ -1545,23 +1548,28 @@ const needsTitle = (event, dialog) => {
 
 /** Whether any player can read an entry, or a page of it (a page's own level, else the entry's). */
 const forPlayers = (d) => d.all || d.readers.length > 0;
-function pageForPlayers(page) {
+const defaultLevel = (page) => {
   const own = page.ownership?.default ?? -1;
-  const level = own === -1 ? page.parent?.ownership?.default ?? 0 : own;
-  return level >= CONST.DOCUMENT_OWNERSHIP_LEVELS.OBSERVER || players().some((u) => page.testUserPermission(u, "OBSERVER"));
+  return own === -1 ? page.parent?.ownership?.default ?? 0 : own;
+};
+function pageForPlayers(page) {
+  return defaultLevel(page) >= CONST.DOCUMENT_OWNERSHIP_LEVELS.OBSERVER || players().some((u) => page.testUserPermission(u, "OBSERVER"));
 }
+/** Whether every player, now and later, can read an entry, or a page of it. */
+const forEveryone = (d) => d.all && players().every((u) => d.entry.testUserPermission(u, "OBSERVER"));
+const pageForEveryone = (page) => defaultLevel(page) >= CONST.DOCUMENT_OWNERSHIP_LEVELS.OBSERVER && players().every((u) => page.testUserPermission(u, "OBSERVER"));
 
-/** The GM's choice of export: "pub" (what players can read, hidden secrets left out) or "gm" (everything, secret
- * blocks labeled), or null if canceled. Players always get their own copy, so they aren't asked. */
-async function askCopy(tab = "party") {
+/** The GM's choice of export, for one entry or a whole tab: "pub" (the players' copy: an entry as its readers see it,
+ * or a tab's entries every player can read; hidden secrets left out) or "gm" (everything, secret blocks labeled), or
+ * null if canceled. Players always get their own copy, so they aren't asked. */
+async function askCopy(scope = "entry") {
   if (!game.user.isGM) return "own";
-  const note = tab === "players" ? `<p class="bcj-dim">On this tab the players' copy holds every player's private journal.</p>`
-    : tab === "handouts" ? `<p class="bcj-dim">On this tab the players' copy holds handouts given to single players too.</p>` : "";
+  const pub = scope === "tab" ? "what every player can read" : "what its readers see";
   const pick = await DialogV2().wait({
     window: { title: "Export as Markdown", icon: "fa-solid fa-file-export" },
     classes: ["bcj-dialog"],
-    content: `<div class="bcj-form"><label class="bcj-check"><input type="radio" name="copy" value="pub" checked> Players' copy: what players can read, hidden secrets left out</label>
-      <label class="bcj-check"><input type="radio" name="copy" value="gm"> GM copy: everything, GM secrets marked</label>${note}</div>`,
+    content: `<div class="bcj-form"><label class="bcj-check"><input type="radio" name="copy" value="pub" checked> Players' copy: ${pub}, hidden secrets left out</label>
+      <label class="bcj-check"><input type="radio" name="copy" value="gm"> GM copy: everything, GM secrets marked</label></div>`,
     buttons: [
       { action: "export", label: "Export", icon: "fa-solid fa-file-export", default: true, callback: (ev, button) => button.form.elements.copy.value },
       { action: "cancel", label: "Cancel" },
@@ -1572,17 +1580,18 @@ async function askCopy(tab = "party") {
 }
 
 /** One entry as Markdown: its title (at the given heading level), its line, then its text pages for this copy
- * ("own": what this user can read; "pub": what players can read; "gm": everything, secrets labeled). */
+ * ("own": what this user can read; "pub": what any player can read; "table": what every player can read; "gm":
+ * everything, secrets labeled). Hidden secrets are left out of all but "gm" (and "own" for a page's owner). */
 function entryMarkdown(d, level = 1, copy = "own") {
   const entry = d.entry;
   const hashes = "#".repeat(level);
-  const pages = entry.pages.contents.filter((p) => p.type === "text" && p.testUserPermission(game.user, "OBSERVER") && (copy !== "pub" || pageForPlayers(p))).sort((a, b) => a.sort - b.sort);
+  const pages = entry.pages.contents.filter((p) => p.type === "text" && p.testUserPermission(game.user, "OBSERVER") && (copy !== "pub" || pageForPlayers(p)) && (copy !== "table" || pageForEveryone(p))).sort((a, b) => a.sort - b.sort);
   const parts = [`${hashes} ${entry.name}`, `*${metaline(d)}*`];
   for (const p of pages) {
     if (pages.length > 1) parts.push(`${hashes}# ${p.name}`);
     // The page's own headings go below the entry's title (and its page names, if it has several).
     const shift = level - 1 + (pages.length > 1 ? 1 : 0);
-    const html = copy === "gm" ? markedSecretsHTML(p) : openSections(visibleHTML(p, copy === "pub" ? false : undefined));
+    const html = copy === "gm" ? markedSecretsHTML(p) : openSections(visibleHTML(p, copy === "own" ? undefined : false));
     parts.push(shiftHeadings(html2md(html), shift));
   }
   return parts.filter(Boolean).join("\n\n");
