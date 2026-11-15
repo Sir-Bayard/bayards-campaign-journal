@@ -821,8 +821,7 @@ class JournalApp extends foundry.applications.api.ApplicationV2 {
       this.view.quest = (quests.find((q) => q.status === "active" && q.revealed) ?? quests.find((q) => q.revealed) ?? quests[0])?.id ?? null;
       saveView(this.view);
     }
-    // A quest's mark shows unless it's the one on show, and the one on show keeps it while held after a restore.
-    const showMark = (q) => !!q.mark && (q.id !== this.view.quest || this.held === `q:${q.id}`);
+    const showMark = (q) => this.#showMark(q);
     // The Quests dot, kept so a Trackers change redraws a window off the Quests tab only when the dot would change.
     this.questDot = !this.isGM && (qtab ? quests : questList()).some(showMark);
     const quest = qtab ? quests.find((q) => q.id === this.view.quest) ?? null : null;
@@ -871,7 +870,7 @@ class JournalApp extends foundry.applications.api.ApplicationV2 {
       const rows = items.map((q) => {
         const sub = [q.category, q.total ? `${q.done}/${q.total}` : ""].filter(Boolean).join(" · ");
         const icons = `${q.party ? `<i class="fa-solid fa-users" data-tooltip="A party quest"></i>` : ""}${q.focus ? `<i class="fa-solid fa-star" data-tooltip="The party's focus"></i>` : ""}`;
-        const mark = showMark(q) ? `<b class="bcj-new bcj-${q.mark}">${q.mark === "new" ? "New" : "Updated"}</b>` : "";
+        const mark = this.#showMark(q) ? `<b class="bcj-new bcj-${q.mark}">${q.mark === "new" ? "New" : "Updated"}</b>` : "";
         return `<a class="bcj-item bcj-qitem bcj-qs-${esc(q.status)} ${q.revealed ? "" : "bcj-qhidden"} ${q.id === this.view.quest ? "active" : ""}" data-action="bcjQuest" data-quest="${esc(q.id)}" data-entry="quest:${esc(q.id)}" draggable="true">
           <span class="bcj-it">${q.revealed ? "" : `<i class="fa-solid fa-eye-slash" data-tooltip="Players can't see it yet"></i> `}${esc(q.name)}</span><span class="bcj-is">${mark}${esc(sub)}</span><span class="bcj-iw">${icons}</span></a>`;
       }).join("");
@@ -1012,11 +1011,13 @@ class JournalApp extends foundry.applications.api.ApplicationV2 {
       }
       await pending;
       // Hold what changed before the window counts as in front again, so no draw marks it in between.
-      if (!this.minimized) this.#holdIfChanged();
+      const held = !this.minimized && this.#holdIfChanged();
       this.#collapsed = this.minimized;
       await settle(this.element);
       // Not if it was closed or minimized again meanwhile.
       if (was && this.rendered && !this.minimized) this.setPosition(was);
+      // Redraw so a held quest shows its mark (the quest on show isn't marked in a draw made before the hold).
+      if (held && this.held?.startsWith("q:") && this.rendered && !this.minimized) this.render();
     } finally {
       this.#restoring = false;
     }
@@ -1180,20 +1181,27 @@ class JournalApp extends foundry.applications.api.ApplicationV2 {
   /** What a player picks counts as seen, and so does what a draw shows in an open window, except while minimized
    * and, after a restore, what changed while it was minimized: that keeps its mark until the player picks something. */
   held = null;
+  /** A quest's mark shows unless it's the one on show, and the one on show keeps it while held after a restore. */
+  #showMark(q) {
+    return !!q.mark && (q.id !== this.view.quest || this.held === `q:${q.id}`);
+  }
   #inFront(key) {
     return !this.isGM && !this.#collapsed && this.held !== key;
   }
-  /** On a restore: hold the entry or quest on show if it changed while the window was minimized. */
+  /** On a restore: hold the entry or quest on show if it changed while the window was minimized. True if held. */
   #holdIfChanged() {
-    if (this.isGM) return;
+    if (this.isGM) return false;
     if (this.view.tab === "quests") {
       const q = this.view.quest && questApi() ? questList().find((x) => x.id === this.view.quest) : null;
-      if (q?.mark) this.held = `q:${q.id}`;
-      return;
+      if (!q?.mark) return false;
+      this.held = `q:${q.id}`;
+      return true;
     }
     const entry = this.view.entry && game.journal.get(this.view.entry);
     const d = entry && describe(entry);
-    if (d && entry.testUserPermission(game.user, "OBSERVER") && freshness(d)) this.held = `e:${d.id}`;
+    if (!d || !entry.testUserPermission(game.user, "OBSERVER") || !freshness(d)) return false;
+    this.held = `e:${d.id}`;
+    return true;
   }
 
   static #onEdit() {
@@ -1270,6 +1278,7 @@ class JournalApp extends foundry.applications.api.ApplicationV2 {
       window: { title: "New page", icon: "fa-solid fa-file-lines" },
       classes: ["bcj-dialog"],
       position: { width: 420 },
+      render: needsTitle,
       content: `<div class="bcj-form"><label>Title <input type="text" name="name" placeholder="House rules" autofocus></label>
         <label class="bcj-check"><input type="checkbox" name="pinned"> Pin it to the top of the party journal</label>
         <label class="bcj-check"><input type="checkbox" name="share" checked> Players can read it now</label>
@@ -1377,6 +1386,7 @@ class JournalApp extends foundry.applications.api.ApplicationV2 {
     const name = await DialogV2().prompt({
       window: { title: "New journal entry", icon: "fa-solid fa-feather" },
       classes: ["bcj-dialog"],
+      render: needsTitle,
       content: `<div class="bcj-form"><label>Title <input type="text" name="name" placeholder="What the guard didn't say" autofocus></label><p class="bcj-dim">Only you and the GM can read it.</p></div>`,
       ok: { label: "Make it", icon: "fa-solid fa-check", callback: (event, button) => button.form.elements.name.value.trim() },
       rejectClose: false,
@@ -1391,6 +1401,7 @@ class JournalApp extends foundry.applications.api.ApplicationV2 {
       window: { title: "New party entry", icon: "fa-solid fa-feather" },
       classes: ["bcj-dialog"],
       position: { width: 420 },
+      render: needsTitle,
       content: `<div class="bcj-form"><label>Title <input type="text" name="name" placeholder="Rumors from the market" autofocus></label>
         <label class="bcj-check"><input type="checkbox" name="edit"> Let the rest of the party edit it too</label>
         <p class="bcj-dim">Everyone can read it, signed with your name. You can change who edits it later.</p></div>`,
@@ -1498,6 +1509,39 @@ class JournalApp extends foundry.applications.api.ApplicationV2 {
 
 const players = () => game.users.filter((u) => !u.isGM).sort((a, b) => a.name.localeCompare(b.name));
 const DialogV2 = () => foundry.applications.api.DialogV2;
+
+/** A dialog's render hook that keeps it open when "Make it" (or Enter) is used with an empty title: the title box
+ * is marked, a line says why, and the line goes once something is typed. Cancel and the close button still close. */
+const needsTitle = (event, dialog) => {
+  const el = dialog?.element ?? event?.target?.element;
+  const input = el?.querySelector('input[name="name"]');
+  if (!input) return;
+  const clear = () => {
+    input.classList.remove("bcj-invalid");
+    input.removeAttribute("aria-invalid");
+    el.querySelector(".bcj-error")?.remove();
+  };
+  input.addEventListener("input", clear);
+  const stop = (ev, button) => {
+    if (button?.dataset.action !== "ok" || input.value.trim()) return;
+    ev.preventDefault();
+    ev.stopImmediatePropagation();
+    input.classList.add("bcj-invalid");
+    input.setAttribute("aria-invalid", "true");
+    if (!el.querySelector(".bcj-error")) {
+      const line = document.createElement("p");
+      line.className = "bcj-error";
+      line.id = `bcj-error-${foundry.utils.randomID(6)}`;
+      line.textContent = "Give it a title to make it.";
+      input.setAttribute("aria-describedby", line.id);
+      input.closest("label")?.after(line);
+    }
+    input.focus();
+  };
+  // On the dialog itself, in the capture phase, so these run before its own button and submit handlers.
+  el.addEventListener("click", (ev) => stop(ev, ev.target.closest?.("button")), true);
+  el.addEventListener("submit", (ev) => stop(ev, ev.submitter), true);
+};
 
 /** Whether any player can read an entry, or a page of it (a page's own level, else the entry's). */
 const forPlayers = (d) => d.all || d.readers.length > 0;
@@ -1636,6 +1680,7 @@ async function giveDialog(v) {
     classes: ["bcj-dialog"],
     position: { width: 420 },
     content: form,
+    render: isNew ? needsTitle : undefined,
     buttons: [
       { action: "ok", label: isNew ? "Make it" : "Save", icon: "fa-solid fa-check", default: true, callback: (event, button) => {
         const e = button.form.elements;
@@ -1962,7 +2007,7 @@ Hooks.on(`${TRACKERS}.changed`, () => {
   for (const app of openApps) {
     if (!app.rendered) continue;
     if (app.view.tab === "quests") app.render();
-    else if (!game.user.isGM && questList().some((q) => q.mark) !== !!app.questDot) app.render();
+    else if (!game.user.isGM && questList().some((q) => q.mark && (q.id !== app.view.quest || app.held === `q:${q.id}`)) !== !!app.questDot) app.render();
   }
 });
 // A quest link clicked in this window opens the quest on the Quests tab instead of in Trackers.

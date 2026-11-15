@@ -135,6 +135,8 @@
 .bcj-dialog .bcj-row > label { flex: 1; }
 .bcj-dialog .bcj-row > label.bcj-grow { flex: 3; }
 .bcj-dialog .bcj-form label.bcj-check { flex-direction: row; align-items: center; gap: 6px; font-size: 13px; }
+.bcj-dialog input.bcj-invalid { border-color: #d9534f; box-shadow: 0 0 0 1px #d9534f; }
+.bcj-dialog .bcj-error { margin: -4px 0 0; color: #ff8a80; font-size: 12px; }
 .bcj-dialog fieldset { display: flex; flex-wrap: wrap; gap: 4px 14px; padding: 6px 10px; margin: 0; }
 .bcj-dialog fieldset legend { font-size: 12px; padding: 0 4px; }
 .bcj-dialog textarea { font-family: "Roboto Mono", monospace; font-size: 12px; resize: vertical; }

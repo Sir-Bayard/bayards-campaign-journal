@@ -7,6 +7,7 @@
 - Opening the journal twice in quick succession (the J key, the Journal tab button, or a GM's Show to players) no longer opens two windows.
 - Secret blocks the GM has revealed now show in players' search, Markdown, Export and "Previously on…", as they do on the page.
 - The GM's Markdown and Export ask each time for the players' copy (what players can read, with hidden secrets left out) or the GM copy (everything, with each secret block marked).
+- New page, New handout, New entry and New party entry no longer close and make nothing when the title is left empty: the dialog stays open and asks for a title.
 - "Previously on…" opens once when clicked on two recaps in quick succession.
 - The Quests tab shows only when the installed PF2e Campaign Trackers has everything the tab uses.
 
