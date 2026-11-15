@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.1
+
+- **Keys stay with the journal while you work in it.** Once you've clicked in the window, or opened it with J or the button, Space doesn't pause the game, the arrows and letters don't move the map, and Tab moves through the window instead of jumping between tokens. In 0.3.0 that only held after reaching the window with Tab, so with the mouse (and PF2e, which takes focus off a clicked button) Foundry still got every key. Click the map to give the keys back; Escape still closes the window.
+- **Tab goes round the window** instead of dropping out to the map after the last button, so the tabs on the left are reached too, and the arrow keys move between those tabs (Enter or Space opens one).
+
 ## 0.3.0
 
 - **Keyboard.** The whole window works from the keyboard: tabs, the list, folds, sort toggles and every button take focus, Enter and Space work them, focus stays put when the window redraws, and the window's keys no longer reach Foundry's own (Space doesn't pause the game). Pinned entries move with **Move up** and **Move down** as well as by dragging; a quest's link can be copied with **Copy link**.

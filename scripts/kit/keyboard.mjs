@@ -1,4 +1,4 @@
-/* Sir Bayard's module kit: keyboard 1. Copied unchanged into each module that uses it; edit the kit's source, not
+/* Sir Bayard's module kit: keyboard 2. Copied unchanged into each module that uses it; edit the kit's source, not
  * this copy. */
 
 /*
@@ -24,10 +24,22 @@
  *
  * keyboardWindow(Base) keeps focus where it was across a redraw, keeps the window's keys from Foundry's keybindings,
  * and shows where focus is.
+ *
+ * Whose keys (the ownKeys option):
+ * - Off (the default), for windows with game actions: the window keeps Tab, and keeps Space, Enter, the arrows and the
+ *   rest only when focus came by keyboard. A GM who clicks "Next turn" and presses Space still unpauses the game.
+ * - On, for windows people read and write in (a journal, a quest log, a ledger): once someone clicks in the window
+ *   or the module puts focus there (focusWindow()), every key but Escape and the function keys is the window's, so
+ *   Space doesn't pause, the map doesn't move and Tab doesn't cycle tokens; a click on the map gives the keys back.
+ *   A click that leaves focus on the page (PF2e takes focus off a clicked button; text and gaps take none) puts it on
+ *   the pane clicked: an element with data-focus-pane="name" and tabindex="-1" (a list, the page being read), else
+ *   the window itself. Mark the pane focusWindow() starts on with data-focus-start. Tab wraps around inside the
+ *   window (past the last control to the first), so focus never drops out to the map.
+ * - Either way, the arrow keys (and Home, End) on a tab that has the window's keys move focus along its tablist.
  */
 
 /** Data attributes that say nothing about which element it is. */
-const NOT_IDENTITY = new Set(["action", "tooltip", "tooltipText", "tooltipHtml", "tooltipDirection", "tooltipClass", "focusKey", "keepScroll", "focusHome", "keyboardFocus", "kitKeys"]);
+const NOT_IDENTITY = new Set(["action", "tooltip", "tooltipText", "tooltipHtml", "tooltipDirection", "tooltipClass", "focusKey", "focusPane", "focusStart", "keepScroll", "focusHome", "keyboardFocus", "kitKeys"]);
 /** Data attributes that usually name a thing (rather than its state), kept when the others don't find it again. */
 const ID_LIKE = /^(id|key|uuid|index|idx|tab|name|path|slot|role|kind|type|section|group|part|field)$|[a-z0-9](Id|Key|Uuid|Index|Idx|Tab|Name|Path|Slot|Role|Kind|Type|Section|Group|Part|Field)$/;
 const TEXT_TYPES = new Set(["text", "search", "url", "tel", "password", "email", "number"]);
@@ -50,6 +62,7 @@ function all(root, selector) {
 function ownKey(el) {
   const tag = el.tagName.toLowerCase();
   if (el.dataset?.focusKey) return attr("data-focus-key", el.dataset.focusKey);
+  if (el.dataset?.focusPane) return attr("data-focus-pane", el.dataset.focusPane);
   if (el.id) return `#${esc(el.id)}`;
   const name = el.getAttribute("name");
   if (name) {
@@ -277,6 +290,10 @@ const PRESSABLE = '[role="button"]:not(button):not(a[href]), [role="tab"]:not(bu
  */
 const WINDOW_KEYS = new Set(["Enter", " ", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Home", "End", "PageUp", "PageDown", "Delete", "Backspace"]);
 const listening = new WeakSet();
+/** Roots whose window has the ownKeys option on. */
+const owning = new WeakSet();
+/** Keys that stay Foundry's even in an ownKeys window: Escape (close the window) and the function keys. */
+const FOUNDRY_KEYS = (key) => key === "Escape" || /^F\d+$/.test(key);
 /** Per page: a count of pointer presses and Tab presses, which move focus (see keyboardWindow's render). */
 const moves = new WeakMap();
 
@@ -290,11 +307,13 @@ const unmark = (el) => {
  * Keyboard handling for a window's root: the window's keys kept from Foundry's keybindings while one of its controls
  * has focus (Foundry is told so through its own `data-keyboard-focus` attribute, for that key only), and Enter and
  * Space on an element with role="button" (or tab or menuitem) that isn't a real button. Safe to call on every render:
- * it listens once per root. A control the module marks data-keyboard-focus itself is left alone.
+ * it listens once per root. A control the module marks data-keyboard-focus itself is left alone. With `ownKeys`,
+ * every key but Escape and the function keys is the window's wherever focus is in it (see "Whose keys" above).
  */
-export function windowKeys(root) {
+export function windowKeys(root, { ownKeys = false } = {}) {
   // (each time: a detached window moves the same element into another page, which needs its own watcher)
   watchModality(docOf(root));
+  if (root && ownKeys) owning.add(root);
   if (!root?.addEventListener || listening.has(root)) return;
   listening.add(root);
   /**
@@ -302,6 +321,8 @@ export function windowKeys(root) {
    * a home list included); the other window keys on a control or a home element, when focus came by keyboard.
    */
   const ours = (el, ev) => {
+    // (with modifiers too: Ctrl+C copies the window's text, not the selected tokens)
+    if (owning.has(root)) return !FOUNDRY_KEYS(ev.key);
     if (ev.altKey || ev.ctrlKey || ev.metaKey) return false;
     if (ev.key === "Tab") return true;
     if (ev.shiftKey || !WINDOW_KEYS.has(ev.key) || el === root) return false;
@@ -310,7 +331,7 @@ export function windowKeys(root) {
   const mark = (ev) => {
     const el = ev.target;
     if (!el?.dataset || !(el === root || root.contains(el))) return false;
-    if (el.matches?.("input, select, textarea, [contenteditable]")) return false;
+    if (el.matches?.("input, select, textarea, [contenteditable]") || el.isContentEditable) return false;
     if (el.dataset.keyboardFocus !== undefined && el.dataset.kitKeys === undefined) return false;
     const yes = ours(el, ev);
     if (yes) {
@@ -338,6 +359,58 @@ export function windowKeys(root) {
     true,
   );
   root.addEventListener("focusout", (ev) => unmark(ev.target), true);
+  // Moving focus, after the target's own handlers (an editor that uses Tab or the arrows itself has said so by then).
+  root.addEventListener("keydown", (ev) => {
+    if (ev.defaultPrevented || ev.altKey || ev.ctrlKey || ev.metaKey) return;
+    const el = ev.target;
+    if (!el || !(el === root || root.contains(el))) return;
+    if (ev.key === "Tab" && owning.has(root)) wrapTab(root, el, ev);
+    else if (TAB_KEYS.has(ev.key) && !ev.shiftKey && el.matches?.('[role="tab"]') && el.dataset?.keyboardFocus !== undefined) stepTab(el, ev);
+  });
+}
+
+/** What Tab stops on: enabled controls taking focus in Tab order (no positive tabindex in our windows), shown. */
+const TABBABLE = 'button, a[href], input:not([type="hidden"]), select, textarea, summary, [tabindex], [contenteditable="true"]';
+const tabbable = (el) => canFocus(el) && el.tabIndex >= 0 && el.getClientRects().length > 0 && getComputedStyle(el).visibility !== "hidden";
+/**
+ * ownKeys: Tab past the window's last control comes back to its first (Shift+Tab the other way), so focus never drops
+ * out to the map, where Tab cycles tokens. Escape and a click outside still leave.
+ */
+function wrapTab(root, active, ev) {
+  const list = all(root, TABBABLE).filter(tabbable);
+  if (!list.length) return;
+  const FOLLOWING = Node.DOCUMENT_POSITION_FOLLOWING;
+  const PRECEDING = Node.DOCUMENT_POSITION_PRECEDING;
+  // From a pane or the window itself, the controls inside it come next; its ancestors don't come before it.
+  const more = ev.shiftKey
+    ? list.some((c) => c !== active && !c.contains(active) && active.compareDocumentPosition(c) & PRECEDING)
+    : list.some((c) => c !== active && active.compareDocumentPosition(c) & FOLLOWING);
+  if (more) return;
+  ev.preventDefault();
+  moveFocus(ev.shiftKey ? list.at(-1) : list[0]);
+}
+/**
+ * Focus moved by the kit during a keydown: the new element gets the mark at once, since Foundry's own listener reads
+ * focus after this one, for the same key (otherwise an arrow that moved focus would also pan the map).
+ */
+function moveFocus(to) {
+  to.focus();
+  if (docOf(to).activeElement !== to || to.matches("input, select, textarea, [contenteditable]") || to.isContentEditable) return;
+  if (to.dataset.keyboardFocus !== undefined && to.dataset.kitKeys === undefined) return;
+  to.dataset.keyboardFocus = "true";
+  to.dataset.kitKeys = "";
+}
+/** Arrow keys (and Home, End) on a tab move focus along its tablist; Enter or Space then opens the tab. */
+const TAB_KEYS = new Set(["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Home", "End"]);
+function stepTab(tab, ev) {
+  const list = tab.closest('[role="tablist"]');
+  const tabs = list ? all(list, '[role="tab"]').filter(tabbable) : [];
+  const i = tabs.indexOf(tab);
+  if (i < 0 || tabs.length < 2) return;
+  const n = tabs.length;
+  const to = ev.key === "Home" ? 0 : ev.key === "End" ? n - 1 : ev.key === "ArrowUp" || ev.key === "ArrowLeft" ? (i - 1 + n) % n : (i + 1) % n;
+  ev.preventDefault();
+  moveFocus(tabs[to]);
 }
 
 /**
@@ -354,7 +427,7 @@ export function focusStyle(module, scope, doc = globalThis.document) {
   outline: 2px solid var(--button-focus-outline-color, var(--input-focus-outline-color, #b5563b));
   outline-offset: -2px;
 }
-:is(${scope})[tabindex="-1"]:focus { outline: none; }`;
+:is(${scope})[tabindex="-1"]:focus, :is(${scope}) [data-focus-pane]:focus { outline: none; }`;
   doc.head.append(style);
 }
 
@@ -404,10 +477,14 @@ export function announce(root, text) {
  * @param {object} opts
  * @param {string} opts.module   the module's id
  * @param {string} opts.scope    a selector for the module's windows, for the focus outline (".pf2e-marketplace")
+ * @param {boolean} [opts.ownKeys]   every key the window's while someone works in it (see "Whose keys" above)
  */
-export function keyboardWindow(Base, { module, scope } = {}) {
+export function keyboardWindow(Base, { module, scope, ownKeys = false } = {}) {
   return class extends Base {
     #retry = null;
+    /** ownKeys: the root whose clicks are watched, and the last click in it ({ pane, at }). */
+    #clicksOn = null;
+    #clicked = null;
 
     /* All in render(), not the render hooks: a module's own _onFirstRender or _replaceHTML often doesn't call super. */
     async render(options = {}, _options = {}) {
@@ -420,12 +497,53 @@ export function keyboardWindow(Base, { module, scope } = {}) {
       const el = this.element;
       if (el?.isConnected) {
         if (module && scope) focusStyle(module, scope, docOf(el));
-        windowKeys(el);
+        windowKeys(el, { ownKeys });
         liveRegion(el);
+        if (ownKeys) this.#watchClicks(el);
       }
       // A click (anywhere in the page) or a Tab while the redraw ran moved focus on purpose: leave it.
       if (state && el === root) this.#retry = restoreFocus(root, state, { retry: this.#retry, userMoved: moves.get(doc) !== before });
+      // ownKeys: a click in the window that started this redraw, whose focus the redraw lost, puts it back in.
+      if (ownKeys) this.#focusIfLost();
       return result;
+    }
+
+    /** ownKeys: watch clicks in the window, so one that leaves focus on the page brings it into the window. */
+    #watchClicks(root) {
+      if (this.#clicksOn === root) return;
+      this.#clicksOn = root;
+      if (!root.hasAttribute("tabindex")) root.tabIndex = -1;
+      root.addEventListener("click", (ev) => {
+        this.#clicked = { pane: ev.target?.closest?.("[data-focus-pane]")?.dataset.focusPane ?? null, at: Date.now() };
+        // After the click's own handlers and PF2e's blur; a redraw the click starts tries again when it's done.
+        setTimeout(() => this.#focusIfLost(), 0);
+      });
+    }
+
+    /** After a click in the window (within 3 s): if focus fell out of it onto the page, put it on the pane clicked. */
+    #focusIfLost() {
+      const want = this.#clicked;
+      const root = this.element;
+      if (!want || Date.now() - want.at > 3000 || !root?.isConnected) return;
+      const doc = docOf(root);
+      const active = doc.activeElement;
+      // Focus in the window, or taken on purpose by something else (a dialog, the chat box): leave it.
+      if (active && active !== doc.body && active !== doc.documentElement) return;
+      this.focusWindow(want.pane);
+    }
+
+    /**
+     * Put focus in the window (for ownKeys windows the module opened at the user's word: a hotkey, a button): on the
+     * pane named (data-focus-pane), else the one marked data-focus-start, else the first pane, else the window.
+     * Returns whether focus is there now.
+     */
+    focusWindow(pane = null) {
+      const root = this.element;
+      if (!root?.isConnected || this.minimized) return false;
+      const target = (pane ? all(root, `[data-focus-pane="${esc(pane)}"]`)[0] : null) ?? root.querySelector("[data-focus-start]") ?? root.querySelector("[data-focus-pane]") ?? root;
+      if (target === root && !root.hasAttribute("tabindex")) root.tabIndex = -1;
+      target.focus({ preventScroll: true });
+      return docOf(root).activeElement === target;
     }
 
     /** Say something to screen readers (see announce). */

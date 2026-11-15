@@ -20,7 +20,8 @@ function registerKeys() {
     hint: "BCJ.KeyOpenHint",
     editable: [{ key: "KeyJ", modifiers: [] }],
     onDown: () => {
-      JournalApp.open();
+      // Opened by the user: focus goes into it, so the next keys are the journal's (the kit's ownKeys).
+      JournalApp.open().then((app) => app?.focusWindow());
       return true;
     },
   });
@@ -44,7 +45,7 @@ function addDirectoryButton(app, html) {
   btn.innerHTML = `<i class="fa-solid fa-book-open" aria-hidden="true"></i> ${esc(L("OpenButton"))} <span class="bcj-open-count" hidden></span>`;
   btn.addEventListener("click", (ev) => {
     ev.preventDefault();
-    JournalApp.open();
+    JournalApp.open().then((app) => app?.focusWindow());
   });
   bar.append(btn);
   updateCount();

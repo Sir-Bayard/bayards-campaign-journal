@@ -48,7 +48,7 @@ Requires Foundry VTT 14 (verified on 14.370). It works with any game system.
 
 Click **Campaign Journal** at the top of the Journal tab, or press **J**. Other modules may also use J; change it in **Configure Controls**. The button shows how many entries are new or updated for you, and a player logging in gets one notice when something arrived while they were away. The window remembers its size and place, per world and user.
 
-The whole window works from the keyboard: Tab moves between the tabs, the list and the buttons, and Enter or Space works whatever has focus.
+The whole window works from the keyboard: Tab moves between the tabs, the list and the buttons, and Enter or Space works whatever has focus. While you're working in the journal (once you've clicked in it, or opened it with J or the button), your keys stay with it: Space doesn't pause the game, the arrows and letters don't move the map, and Tab doesn't jump between tokens. Tab goes round the window (from the last button back to the first), and on the tabs at the left the arrow keys move between them. Click the map to give the keys back; Escape still closes the window.
 
 ## Where things live
 

@@ -114,7 +114,7 @@ function keepInPlace(keep, stand, oldRoot, newRoot) {
 /** The window: size and place kept per world and user and a whole restore from minimized (the kit's window memory;
  * the size kept before 0.3.0 is read once), focus kept across redraws and the window's keys kept from Foundry's
  * keybindings (the kit's keyboard pattern). */
-class JournalApp extends keyboardWindow(rememberWindow(foundry.applications.api.ApplicationV2, { module: MOD, name: "main", from: `${MOD}.size` }), { module: MOD, scope: ".bcj, .bcj-dialog" }) {
+class JournalApp extends keyboardWindow(rememberWindow(foundry.applications.api.ApplicationV2, { module: MOD, name: "main", from: `${MOD}.size` }), { module: MOD, scope: ".bcj, .bcj-dialog", ownKeys: true }) {
   static DEFAULT_OPTIONS = {
     id: MOD,
     classes: ["bcj"],
@@ -319,9 +319,9 @@ class JournalApp extends keyboardWindow(rememberWindow(foundry.applications.api.
       <section class="bcj-list" id="bcj-panel" role="tabpanel" aria-labelledby="bcj-tabname-${this.view.tab}">
         <div class="bcj-search"><i class="fa-solid fa-magnifying-glass" aria-hidden="true"></i><input type="search" name="bcj-q" placeholder="${esc(L("SearchTheJournal"))}" aria-label="${esc(L("SearchTheJournal"))}" value="${esc(this.view.query)}"></div>
         ${actions}
-        <div class="bcj-scroll" data-keep-scroll="list">${noFolders ? `<p class="bcj-none">${esc(L("FoldersBeingMade"))}</p>` : listBody}<p class="bcj-none bcj-nomatch" hidden>${esc(L("NothingMatches"))}</p></div>
+        <div class="bcj-scroll" data-keep-scroll="list" data-focus-pane="list" tabindex="-1">${noFolders ? `<p class="bcj-none">${esc(L("FoldersBeingMade"))}</p>` : listBody}<p class="bcj-none bcj-nomatch" hidden>${esc(L("NothingMatches"))}</p></div>
       </section>
-      <section class="bcj-read" data-keep-scroll="read" aria-label="${esc(L("Reading"))}">${qtab ? this.#questPage(quest, qapi) : current ? await this.#page(current) : this.#empty()}</section>
+      <section class="bcj-read" data-keep-scroll="read" data-focus-pane="read" data-focus-start tabindex="-1" aria-label="${esc(L("Reading"))}">${qtab ? this.#questPage(quest, qapi) : current ? await this.#page(current) : this.#empty()}</section>
     </div>`;
   }
 
